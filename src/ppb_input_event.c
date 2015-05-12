@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -34,7 +34,11 @@
 void
 ppb_input_event_destroy(void *p)
 {
-    // do nothing
+    struct pp_input_event_s *ie = p;
+
+    ppb_var_release(ie->code);
+    ppb_var_release(ie->text);
+    free_and_nullify(ie->segment_offsets);
 }
 
 int32_t
@@ -105,7 +109,14 @@ ppb_input_event_get_type(PP_Resource event)
 PP_TimeTicks
 ppb_input_event_get_time_stamp(PP_Resource event)
 {
-    return 0;
+    struct pp_input_event_s *ie = pp_resource_acquire(event, PP_RESOURCE_INPUT_EVENT);
+    if (!ie) {
+        trace_error("%s, bad resource\n", __func__);
+        return PP_INPUTEVENT_TYPE_UNDEFINED;
+    }
+    PP_TimeTicks time_stamp = ie->time_stamp;
+    pp_resource_release(event);
+    return time_stamp;
 }
 
 uint32_t
@@ -226,7 +237,20 @@ ppb_mouse_input_event_get_click_count(PP_Resource mouse_event)
 struct PP_Point
 ppb_mouse_input_event_get_movement(PP_Resource mouse_event)
 {
-    return PP_MakePoint(0, 0);
+    struct pp_input_event_s *ie = pp_resource_acquire(mouse_event, PP_RESOURCE_INPUT_EVENT);
+    if (!ie) {
+        trace_error("%s, bad resource\n", __func__);
+        return PP_MakePoint(0, 0);
+    }
+    if (ie->event_class != PP_INPUTEVENT_CLASS_MOUSE) {
+        trace_error("%s, not a mouse event\n", __func__);
+        pp_resource_release(mouse_event);
+        return PP_MakePoint(0, 0);
+    }
+
+    struct PP_Point mouse_movement = ie->mouse_movement;
+    pp_resource_release(mouse_event);
+    return mouse_movement;
 }
 
 PP_Resource
@@ -246,6 +270,7 @@ ppb_wheel_input_event_create(PP_Instance instance, PP_TimeTicks time_stamp, uint
         return 0;
     }
     ie->event_class = PP_INPUTEVENT_CLASS_WHEEL;
+    ie->type = PP_INPUTEVENT_TYPE_WHEEL;
     ie->time_stamp = time_stamp;
     ie->modifiers = modifiers;
     ie->wheel_delta.x = wheel_delta ? wheel_delta->x : 0;
@@ -358,10 +383,8 @@ ppb_keyboard_input_event_create_1_2(PP_Instance instance, PP_InputEvent_Type typ
     ie->time_stamp = time_stamp;
     ie->modifiers = modifiers;
     ie->key_code = key_code;
-    ie->character_text = character_text;
-    ie->code = code;
-    ppb_var_add_ref(character_text);
-    ppb_var_add_ref(code);
+    ie->text = ppb_var_add_ref2(character_text);
+    ie->code = ppb_var_add_ref2(code);
 
     pp_resource_release(input_event);
     return input_event;
@@ -413,8 +436,7 @@ ppb_keyboard_input_event_get_character_text(PP_Resource character_event)
         return PP_MakeUndefined();
     }
 
-    struct PP_Var character_text = ie->character_text;
-    ppb_var_add_ref(character_text);
+    struct PP_Var character_text = ppb_var_add_ref2(ie->text);
     pp_resource_release(character_event);
     return character_text;
 }
@@ -470,42 +492,153 @@ ppb_ime_input_event_create(PP_Instance instance, PP_InputEvent_Type type, PP_Tim
                            const uint32_t segment_offsets[], int32_t target_segment,
                            uint32_t selection_start, uint32_t selection_end)
 {
-    return 0;
+    struct pp_instance_s *pp_i = tables_get_pp_instance(instance);
+    if (!pp_i) {
+        trace_error("%s, bad instance\n", __func__);
+        return 0;
+    }
+
+    if (type != PP_INPUTEVENT_TYPE_IME_COMPOSITION_START &&
+        type != PP_INPUTEVENT_TYPE_IME_COMPOSITION_UPDATE &&
+        type != PP_INPUTEVENT_TYPE_IME_COMPOSITION_END &&
+        type != PP_INPUTEVENT_TYPE_IME_TEXT)
+    {
+        trace_warning("%s, wrong type=%d\n", __func__, type);
+        return 0;
+    }
+
+    PP_Resource input_event = pp_resource_allocate(PP_RESOURCE_INPUT_EVENT, pp_i);
+    struct pp_input_event_s *ie = pp_resource_acquire(input_event, PP_RESOURCE_INPUT_EVENT);
+    if (!ie) {
+        trace_error("%s, can't allocate memory\n", __func__);
+        return 0;
+    }
+    ie->event_class =     PP_INPUTEVENT_CLASS_IME;
+    ie->type =            type;
+    ie->time_stamp =      time_stamp;
+    ie->text =            ppb_var_add_ref2(text);
+    ie->segment_number =  segment_number;
+    ie->segment_offsets = NULL;
+    if (segment_number > 0) {
+        ie->segment_offsets = malloc((segment_number + 1) * sizeof(uint32_t));
+        memcpy(ie->segment_offsets, segment_offsets, (segment_number + 1) * sizeof(uint32_t));
+    }
+    ie->target_segment =  target_segment;
+    ie->selection_start = selection_start;
+    ie->selection_end =   selection_end;
+
+    pp_resource_release(input_event);
+    return input_event;
 }
 
 PP_Bool
 ppb_ime_input_event_is_ime_input_event(PP_Resource resource)
 {
-    return PP_TRUE;
+    struct pp_input_event_s *ie = pp_resource_acquire(resource, PP_RESOURCE_INPUT_EVENT);
+    if (!ie) {
+        trace_error("%s, bad resource\n", __func__);
+        return PP_FALSE;
+    }
+    PP_Bool res = ie->event_class == PP_INPUTEVENT_CLASS_IME;
+    pp_resource_release(resource);
+    return res;
 }
 
 struct PP_Var
 ppb_ime_input_event_get_text(PP_Resource ime_event)
 {
-    return PP_MakeUndefined();
+    struct pp_input_event_s *ie = pp_resource_acquire(ime_event, PP_RESOURCE_INPUT_EVENT);
+    if (!ie) {
+        trace_error("%s, bad resource\n", __func__);
+        return PP_MakeUndefined();
+    }
+    if (ie->event_class != PP_INPUTEVENT_CLASS_IME) {
+        trace_error("%s, not an IME event\n", __func__);
+        pp_resource_release(ime_event);
+        return PP_MakeUndefined();
+    }
+
+    struct PP_Var text = ppb_var_add_ref2(ie->text);
+    pp_resource_release(ime_event);
+    return text;
 }
 
 uint32_t
 ppb_ime_input_event_get_segment_number(PP_Resource ime_event)
 {
-    return 0;
+    struct pp_input_event_s *ie = pp_resource_acquire(ime_event, PP_RESOURCE_INPUT_EVENT);
+    if (!ie) {
+        trace_error("%s, bad resource\n", __func__);
+        return 0;
+    }
+    if (ie->event_class != PP_INPUTEVENT_CLASS_IME) {
+        trace_error("%s, not an IME event\n", __func__);
+        pp_resource_release(ime_event);
+        return 0;
+    }
+
+    uint32_t segment_number = ie->segment_number;
+    pp_resource_release(ime_event);
+    return segment_number;
 }
 
 uint32_t
 ppb_ime_input_event_get_segment_offset(PP_Resource ime_event, uint32_t index)
 {
-    return 0;
+    struct pp_input_event_s *ie = pp_resource_acquire(ime_event, PP_RESOURCE_INPUT_EVENT);
+    if (!ie) {
+        trace_error("%s, bad resource\n", __func__);
+        return 0;
+    }
+    if (ie->event_class != PP_INPUTEVENT_CLASS_IME) {
+        trace_error("%s, not an IME event\n", __func__);
+        pp_resource_release(ime_event);
+        return 0;
+    }
+
+    uint32_t segment_offset = (index <= ie->segment_number) ? ie->segment_offsets[index] : 0;
+    pp_resource_release(ime_event);
+    return segment_offset;
 }
 
 int32_t
 ppb_ime_input_event_get_target_segment(PP_Resource ime_event)
 {
-    return 0;
+    struct pp_input_event_s *ie = pp_resource_acquire(ime_event, PP_RESOURCE_INPUT_EVENT);
+    if (!ie) {
+        trace_error("%s, bad resource\n", __func__);
+        return 0;
+    }
+    if (ie->event_class != PP_INPUTEVENT_CLASS_IME) {
+        trace_error("%s, not an IME event\n", __func__);
+        pp_resource_release(ime_event);
+        return 0;
+    }
+
+    int32_t target_segment = ie->target_segment;
+    pp_resource_release(ime_event);
+    return target_segment;
 }
 
 void
 ppb_ime_input_event_get_selection(PP_Resource ime_event, uint32_t *start, uint32_t *end)
 {
+    struct pp_input_event_s *ie = pp_resource_acquire(ime_event, PP_RESOURCE_INPUT_EVENT);
+    if (!ie) {
+        trace_error("%s, bad resource\n", __func__);
+        return;
+    }
+    if (ie->event_class != PP_INPUTEVENT_CLASS_IME) {
+        trace_error("%s, not an IME event\n", __func__);
+        pp_resource_release(ime_event);
+        return;
+    }
+
+    if (start)
+        *start = ie->selection_start;
+    if (end)
+        *end = ie->selection_end;
+    pp_resource_release(ime_event);
 }
 
 
@@ -563,7 +696,7 @@ TRACE_WRAPPER
 PP_TimeTicks
 trace_ppb_input_event_get_time_stamp(PP_Resource event)
 {
-    trace_info("[PPB] {zilch} %s event=%d\n", __func__+6, event);
+    trace_info("[PPB] {full} %s event=%d\n", __func__+6, event);
     return ppb_input_event_get_time_stamp(event);
 }
 
@@ -631,7 +764,7 @@ TRACE_WRAPPER
 struct PP_Point
 trace_ppb_mouse_input_event_get_movement(PP_Resource mouse_event)
 {
-    trace_info("[PPB] {zilch} %s mouse_event=%d\n", __func__+6, mouse_event);
+    trace_info("[PPB] {full} %s mouse_event=%d\n", __func__+6, mouse_event);
     return ppb_mouse_input_event_get_movement(mouse_event);
 }
 
@@ -817,7 +950,7 @@ trace_ppb_ime_input_event_create(PP_Instance instance, PP_InputEvent_Type type,
                                  uint32_t selection_end)
 {
     char *s_text = trace_var_as_string(text);
-    trace_info("[PPB] {zilch} %s instance=%d, type=%d, time_stamp=%f, text=%s, segment_number=%u, "
+    trace_info("[PPB] {full} %s instance=%d, type=%d, time_stamp=%f, text=%s, segment_number=%u, "
                "segment_offsets=%p, target_segment=%d, selection_start=%u, selection_end=%u\n",
                __func__+6, instance, type, time_stamp, s_text, segment_number, segment_offsets,
                target_segment, selection_start, selection_end);
@@ -831,7 +964,7 @@ TRACE_WRAPPER
 PP_Bool
 trace_ppb_ime_input_event_is_ime_input_event(PP_Resource resource)
 {
-    trace_info("[PPB] {zilch} %s resource=%d\n", __func__+6, resource);
+    trace_info("[PPB] {full} %s resource=%d\n", __func__+6, resource);
     return ppb_ime_input_event_is_ime_input_event(resource);
 }
 
@@ -839,7 +972,7 @@ TRACE_WRAPPER
 struct PP_Var
 trace_ppb_ime_input_event_get_text(PP_Resource ime_event)
 {
-    trace_info("[PPB] {zilch} %s ime_event=%d\n", __func__+6, ime_event);
+    trace_info("[PPB] {full} %s ime_event=%d\n", __func__+6, ime_event);
     return ppb_ime_input_event_get_text(ime_event);
 }
 
@@ -847,7 +980,7 @@ TRACE_WRAPPER
 uint32_t
 trace_ppb_ime_input_event_get_segment_number(PP_Resource ime_event)
 {
-    trace_info("[PPB] {zilch} %s ime_event=%d\n", __func__+6, ime_event);
+    trace_info("[PPB] {full} %s ime_event=%d\n", __func__+6, ime_event);
     return ppb_ime_input_event_get_segment_number(ime_event);
 }
 
@@ -855,7 +988,7 @@ TRACE_WRAPPER
 uint32_t
 trace_ppb_ime_input_event_get_segment_offset(PP_Resource ime_event, uint32_t index)
 {
-    trace_info("[PPB] {zilch} %s ime_event=%d, index=%u\n", __func__+6, ime_event, index);
+    trace_info("[PPB] {full} %s ime_event=%d, index=%u\n", __func__+6, ime_event, index);
     return ppb_ime_input_event_get_segment_offset(ime_event, index);
 }
 
@@ -863,7 +996,7 @@ TRACE_WRAPPER
 int32_t
 trace_ppb_ime_input_event_get_target_segment(PP_Resource ime_event)
 {
-    trace_info("[PPB] {zilch} %s ime_event=%d\n", __func__+6, ime_event);
+    trace_info("[PPB] {full} %s ime_event=%d\n", __func__+6, ime_event);
     return ppb_ime_input_event_get_target_segment(ime_event);
 }
 
@@ -871,7 +1004,7 @@ TRACE_WRAPPER
 void
 trace_ppb_ime_input_event_get_selection(PP_Resource ime_event, uint32_t *start, uint32_t *end)
 {
-    trace_info("[PPB] {zilch} %s ime_event=%d\n", __func__+6, ime_event);
+    trace_info("[PPB] {full} %s ime_event=%d\n", __func__+6, ime_event);
     return ppb_ime_input_event_get_selection(ime_event, start, end);
 }
 
@@ -882,7 +1015,7 @@ const struct PPB_InputEvent_1_0 ppb_input_event_interface_1_0 = {
     .ClearInputEventRequest =       TWRAPF(ppb_input_event_clear_input_event_request),
     .IsInputEvent =                 TWRAPF(ppb_input_event_is_input_event),
     .GetType =                      TWRAPF(ppb_input_event_get_type),
-    .GetTimeStamp =                 TWRAPZ(ppb_input_event_get_time_stamp),
+    .GetTimeStamp =                 TWRAPF(ppb_input_event_get_time_stamp),
     .GetModifiers =                 TWRAPF(ppb_input_event_get_modifiers),
 };
 
@@ -892,7 +1025,7 @@ const struct PPB_MouseInputEvent_1_1 ppb_mouse_input_event_interface_1_1 = {
     .GetButton =            TWRAPF(ppb_mouse_input_event_get_button),
     .GetPosition =          TWRAPF(ppb_mouse_input_event_get_position),
     .GetClickCount =        TWRAPF(ppb_mouse_input_event_get_click_count),
-    .GetMovement =          TWRAPZ(ppb_mouse_input_event_get_movement),
+    .GetMovement =          TWRAPF(ppb_mouse_input_event_get_movement),
 };
 
 const struct PPB_WheelInputEvent_1_0 ppb_wheel_input_event_interface_1_0 = {
@@ -928,21 +1061,21 @@ const struct PPB_TouchInputEvent_1_0 ppb_touch_input_event_interface_1_0 = {
 };
 
 const struct PPB_IMEInputEvent_Dev_0_2 ppb_ime_input_event_dev_interface_0_2 = {
-    .Create =           TWRAPZ(ppb_ime_input_event_create),
-    .IsIMEInputEvent =  TWRAPZ(ppb_ime_input_event_is_ime_input_event),
-    .GetText =          TWRAPZ(ppb_ime_input_event_get_text),
-    .GetSegmentNumber = TWRAPZ(ppb_ime_input_event_get_segment_number),
-    .GetSegmentOffset = TWRAPZ(ppb_ime_input_event_get_segment_offset),
-    .GetTargetSegment = TWRAPZ(ppb_ime_input_event_get_target_segment),
-    .GetSelection =     TWRAPZ(ppb_ime_input_event_get_selection),
+    .Create =           TWRAPF(ppb_ime_input_event_create),
+    .IsIMEInputEvent =  TWRAPF(ppb_ime_input_event_is_ime_input_event),
+    .GetText =          TWRAPF(ppb_ime_input_event_get_text),
+    .GetSegmentNumber = TWRAPF(ppb_ime_input_event_get_segment_number),
+    .GetSegmentOffset = TWRAPF(ppb_ime_input_event_get_segment_offset),
+    .GetTargetSegment = TWRAPF(ppb_ime_input_event_get_target_segment),
+    .GetSelection =     TWRAPF(ppb_ime_input_event_get_selection),
 };
 
 const struct PPB_IMEInputEvent_1_0 ppb_ime_input_event_interface_1_0 = {
-    .Create =           TWRAPZ(ppb_ime_input_event_create),
-    .IsIMEInputEvent =  TWRAPZ(ppb_ime_input_event_is_ime_input_event),
-    .GetText =          TWRAPZ(ppb_ime_input_event_get_text),
-    .GetSegmentNumber = TWRAPZ(ppb_ime_input_event_get_segment_number),
-    .GetSegmentOffset = TWRAPZ(ppb_ime_input_event_get_segment_offset),
-    .GetTargetSegment = TWRAPZ(ppb_ime_input_event_get_target_segment),
-    .GetSelection =     TWRAPZ(ppb_ime_input_event_get_selection),
+    .Create =           TWRAPF(ppb_ime_input_event_create),
+    .IsIMEInputEvent =  TWRAPF(ppb_ime_input_event_is_ime_input_event),
+    .GetText =          TWRAPF(ppb_ime_input_event_get_text),
+    .GetSegmentNumber = TWRAPF(ppb_ime_input_event_get_segment_number),
+    .GetSegmentOffset = TWRAPF(ppb_ime_input_event_get_segment_offset),
+    .GetTargetSegment = TWRAPF(ppb_ime_input_event_get_target_segment),
+    .GetSelection =     TWRAPF(ppb_ime_input_event_get_selection),
 };

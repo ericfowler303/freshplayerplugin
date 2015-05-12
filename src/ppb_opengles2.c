@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -30,6 +30,9 @@
 #include "pp_resource.h"
 #include "reverse_constant.h"
 #include <GLES2/gl2ext.h>
+#if !HAVE_GLES2
+#include "shader_translator.h"
+#endif
 
 
 #define PROLOGUE(g3d, escape_statement)                                                 \
@@ -45,6 +48,38 @@
     glXMakeCurrent(display.x, None, NULL);                                              \
     pthread_mutex_unlock(&display.lock);                                                \
     pp_resource_release(context)
+
+
+#if !HAVE_GLES2
+static GHashTable  *shader_type_ht = NULL;      // shader id -> shader type
+static GHashTable  *shader_source_ht = NULL;    // shader id -> original shader source
+#endif
+
+
+static
+void
+__attribute__((constructor))
+constructor_ppb_opengles2(void)
+{
+#if !HAVE_GLES2
+    shader_type_ht = g_hash_table_new(g_direct_hash, g_direct_equal);
+    shader_source_ht = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
+#endif
+}
+
+static
+void
+__attribute__((destructor))
+destructor_ppb_opengles2(void)
+{
+#if !HAVE_GLES2
+    if (shader_type_ht)
+        g_hash_table_unref(shader_type_ht);
+
+    if (shader_source_ht)
+        g_hash_table_unref(shader_source_ht);
+#endif
+}
 
 void
 ppb_opengles2_ActiveTexture(PP_Resource context, GLenum texture)
@@ -275,6 +310,9 @@ ppb_opengles2_CreateShader(PP_Resource context, GLenum type)
 {
     PROLOGUE(g3d, return 0);
     GLuint res = glCreateShader(type);
+#if !HAVE_GLES2
+    g_hash_table_insert(shader_type_ht, GSIZE_TO_POINTER(res), GSIZE_TO_POINTER(type));
+#endif
     EPILOGUE();
     return res;
 }
@@ -324,6 +362,12 @@ ppb_opengles2_DeleteShader(PP_Resource context, GLuint shader)
 {
     PROLOGUE(g3d, return);
     glDeleteShader(shader);
+
+#if !HAVE_GLES2
+    g_hash_table_remove(shader_source_ht, GSIZE_TO_POINTER(shader));
+    g_hash_table_remove(shader_type_ht, GSIZE_TO_POINTER(shader));
+#endif
+
     EPILOGUE();
 }
 
@@ -614,7 +658,21 @@ void
 ppb_opengles2_GetShaderiv(PP_Resource context, GLuint shader, GLenum pname, GLint *params)
 {
     PROLOGUE(g3d, return);
+#if HAVE_GLES2
     glGetShaderiv(shader, pname, params);
+#else
+
+    if (pname == GL_SHADER_SOURCE_LENGTH) {
+        char *s = g_hash_table_lookup(shader_source_ht, GSIZE_TO_POINTER(shader));
+        size_t len = s ? strlen(s) : 0;
+
+        if (params)
+            params[0] = len;
+    } else {
+
+        glGetShaderiv(shader, pname, params);
+    }
+#endif
     EPILOGUE();
 }
 
@@ -641,7 +699,31 @@ ppb_opengles2_GetShaderSource(PP_Resource context, GLuint shader, GLsizei bufsiz
                               char *source)
 {
     PROLOGUE(g3d, return);
+#if HAVE_GLES2
     glGetShaderSource(shader, bufsize, length, source);
+#else
+
+    GLsizei  len;
+    char    *s = g_hash_table_lookup(shader_source_ht, GSIZE_TO_POINTER(shader));
+    if (!s) {
+        len = 0;
+        goto done;
+    }
+
+    len = strlen(s);
+
+    // if shader source is too big, copy only what could be fit into a buffer
+    if (len + 1 > bufsize)
+        len = bufsize - 1;
+
+    memcpy(source, s, len);
+    source[len] = '\0';
+
+done:
+    if (length)
+        *length = len;
+#endif
+
     EPILOGUE();
 }
 
@@ -870,16 +952,52 @@ ppb_opengles2_ShaderBinary(PP_Resource context, GLsizei n, const GLuint *shaders
                            GLenum binaryformat, const void *binary, GLsizei length)
 {
     PROLOGUE(g3d, return);
+#if !HAVE_GLES2
+    trace_error("%s, glShaderBinary is not supported yet, beware unexpected behavior\n", __func__);
+#endif
     glShaderBinary(n, shaders, binaryformat, binary, length);
     EPILOGUE();
 }
+
+#if !HAVE_GLES2
+static
+char *
+combine_shader_source_parts(GLsizei count, const char **str, const GLint *length)
+{
+    GString *res = g_string_new(NULL);
+
+    for (GLsizei k = 0; k < count; k ++) {
+        if (length)
+            res = g_string_append_len(res, str[k], length[k]);
+        else
+            res = g_string_append(res, str[k]);
+    }
+
+    return g_string_free(res, FALSE);
+}
+#endif
 
 void
 ppb_opengles2_ShaderSource(PP_Resource context, GLuint shader, GLsizei count, const char **str,
                            const GLint *length)
 {
     PROLOGUE(g3d, return);
+#if HAVE_GLES2
     glShaderSource(shader, count, str, length);
+#else
+
+    GLenum type = GPOINTER_TO_SIZE(g_hash_table_lookup(shader_type_ht, GSIZE_TO_POINTER(shader)));
+
+    // save combined body
+    char *body = combine_shader_source_parts(count, str, length);
+    g_hash_table_insert(shader_source_ht, GSIZE_TO_POINTER(shader), body);
+
+    // provide GL function with translated shader body
+    char *translated_body = translate_shader(type, body);
+    glShaderSource(shader, 1, (const char **)&translated_body, NULL);
+    g_free(translated_body);
+#endif
+
     EPILOGUE();
 }
 

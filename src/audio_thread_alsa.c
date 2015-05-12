@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -38,6 +38,7 @@ struct audio_stream_s {
     snd_pcm_t                  *pcm;
     struct pollfd              *fds;
     size_t                      nfds;
+    size_t                      sample_frame_count;
     audio_stream_capture_cb_f  *capture_cb;
     audio_stream_playback_cb_f *playback_cb;
     void                       *cb_user_data;
@@ -53,6 +54,7 @@ static volatile int     terminate_thread = 0;
 static int              notification_pipe[2];
 static pthread_t        audio_thread_id;
 static pthread_mutex_t  lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_barrier_t stream_list_update_barrier;
 
 
 static
@@ -175,15 +177,14 @@ audio_thread(void *param)
 
     ppb_message_loop_mark_thread_unsuitable();
 
+    nfds = do_rebuild_fds(&fds);
+    pthread_barrier_wait(&stream_list_update_barrier);
+    if (nfds == 0)
+        goto quit;
+
     while (1) {
         if (g_atomic_int_get(&terminate_thread))
             goto quit;
-
-        if (g_atomic_int_get(&rebuild_fds)) {
-            nfds = do_rebuild_fds(&fds);
-            if (nfds == 0)
-                goto quit;
-        }
 
         int res = poll(fds, nfds, 10 * 1000);
         if (res == -1) {
@@ -198,6 +199,13 @@ audio_thread(void *param)
 
         if (fds[0].revents)
             drain_wakeup_pipe(fds[0].fd);
+
+        if (g_atomic_int_get(&rebuild_fds)) {
+            nfds = do_rebuild_fds(&fds);
+            pthread_barrier_wait(&stream_list_update_barrier);
+            if (nfds == 0)
+                goto quit;
+        }
 
         for (uintptr_t k = 1; k < nfds; k ++) {
             unsigned short revents = 0;
@@ -217,24 +225,59 @@ audio_thread(void *param)
 
             if (revents & (POLLIN | POLLOUT)) {
                 int                 paused = g_atomic_int_get(&as->paused);
-                const size_t        frame_size = 2 * sizeof(int16_t);
-
-                snd_pcm_sframes_t frame_count = snd_pcm_avail(as->pcm);
-                size_t sz = MIN(frame_count * frame_size, sizeof(buf));
+                snd_pcm_sframes_t   frame_count = snd_pcm_avail(as->pcm);
 
                 if (revents & POLLIN) {
-                    // TODO: implement POLLIN
+                    // POLLIN
+                    const size_t frame_size = 1 * sizeof(int16_t); // mono 16-bit
+                    const size_t max_segment_length = MIN(as->sample_frame_count * frame_size,
+                                                          sizeof(buf));
+                    size_t       to_process = frame_count * frame_size;
+
+                    while (to_process > 0) {
+                        snd_pcm_sframes_t frames_read;
+                        const size_t segment_length = MIN(to_process, max_segment_length);
+
+                        frames_read = snd_pcm_readi(as->pcm, buf, segment_length / frame_size);
+                        if (frames_read < 0) {
+                            trace_warning("%s, snd_pcm_readi error %d\n", __func__,
+                                          (int)frames_read);
+                            recover_pcm(as->pcm);
+                            continue;
+                        }
+
+                        if (!paused && as->capture_cb)
+                            as->capture_cb(buf, frames_read * frame_size, 0, as->cb_user_data);
+
+                        to_process -= frames_read * frame_size;
+                    }
+
                 } else {
                     // POLLOUT
-                    if (paused || !as->playback_cb)
-                        memset(buf, 0, sz);
-                    else
-                        as->playback_cb(buf, sz, 0, as->cb_user_data);
+                    const size_t frame_size = 2 * sizeof(int16_t); // stereo 16-bit
+                    const size_t max_segment_length = MIN(as->sample_frame_count * frame_size,
+                                                          sizeof(buf));
+                    size_t       to_process = frame_count * frame_size;
 
-                    snd_pcm_sframes_t written = snd_pcm_writei(as->pcm, buf, sz / frame_size);
-                    if (written < 0) {
-                        trace_warning("%s, snd_pcm_writei error %d\n", __func__, (int)written);
-                        recover_pcm(as->pcm);
+                    while (to_process > 0) {
+                        snd_pcm_sframes_t frames_written;
+                        const size_t segment_length = MIN(to_process, max_segment_length);
+
+                        if (paused || !as->playback_cb)
+                            memset(buf, 0, segment_length);
+                        else
+                            as->playback_cb(buf, segment_length, 0, as->cb_user_data);
+
+                        frames_written = snd_pcm_writei(as->pcm, buf, segment_length / frame_size);
+
+                        if (frames_written < 0) {
+                            trace_warning("%s, snd_pcm_writei error %d\n", __func__,
+                                          (int)frames_written);
+                            recover_pcm(as->pcm);
+                            continue;
+                        }
+
+                        to_process -= frames_written * frame_size;
                     }
                 }
             }
@@ -272,8 +315,6 @@ constructor_audio_thread_alsa(void)
 
     make_nonblock(notification_pipe[0]);
     make_nonblock(notification_pipe[1]);
-
-    g_atomic_int_set(&rebuild_fds, 1);
 }
 
 static
@@ -299,12 +340,13 @@ wakeup_audio_thread(void)
 {
     g_atomic_int_set(&rebuild_fds, 1);
     RETRY_ON_EINTR(write(notification_pipe[1], "+", 1));
+    pthread_barrier_wait(&stream_list_update_barrier);
 }
 
 static
 audio_stream *
-alsa_create_stream(audio_stream_direction type, unsigned int sample_rate,
-                    unsigned int sample_frame_count)
+alsa_create_stream(audio_stream_direction direction, unsigned int sample_rate,
+                   unsigned int sample_frame_count, const char *pcm_name)
 {
     audio_stream *as;
     snd_pcm_hw_params_t *hw_params;
@@ -312,13 +354,18 @@ alsa_create_stream(audio_stream_direction type, unsigned int sample_rate,
     int dir;
 
     if (!g_atomic_int_get(&audio_thread_started)) {
+        pthread_barrier_init(&stream_list_update_barrier, NULL, 2);
         pthread_create(&audio_thread_id, NULL, audio_thread, NULL);
         g_atomic_int_set(&audio_thread_started, 1);
+        pthread_barrier_wait(&stream_list_update_barrier);
     }
 
     as = calloc(1, sizeof(*as));
     if (!as)
         goto err;
+
+    as->sample_frame_count = sample_frame_count;
+    g_atomic_int_set(&as->paused, 1);
 
 #define CHECK_A(funcname, params)                                                       \
     do {                                                                                \
@@ -329,9 +376,11 @@ alsa_create_stream(audio_stream_direction type, unsigned int sample_rate,
         }                                                                               \
     } while (0)
 
-    // TODO: select device
-    // TODO: create capture stream
-    CHECK_A(snd_pcm_open, (&as->pcm, "default", SND_PCM_STREAM_PLAYBACK, 0));
+    if (direction == STREAM_PLAYBACK)
+        CHECK_A(snd_pcm_open, (&as->pcm, pcm_name, SND_PCM_STREAM_PLAYBACK, 0));
+    else
+        CHECK_A(snd_pcm_open, (&as->pcm, pcm_name, SND_PCM_STREAM_CAPTURE, 0));
+
     CHECK_A(snd_pcm_hw_params_malloc, (&hw_params));
     CHECK_A(snd_pcm_hw_params_any, (as->pcm, hw_params));
     CHECK_A(snd_pcm_hw_params_set_access, (as->pcm, hw_params, SND_PCM_ACCESS_RW_INTERLEAVED));
@@ -339,7 +388,9 @@ alsa_create_stream(audio_stream_direction type, unsigned int sample_rate,
     dir = 0;
     unsigned int rate = sample_rate;
     CHECK_A(snd_pcm_hw_params_set_rate_near, (as->pcm, hw_params, &rate, &dir));
-    CHECK_A(snd_pcm_hw_params_set_channels, (as->pcm, hw_params, 2));
+
+    const int channel_count = (direction == STREAM_PLAYBACK) ? 2 : 1;
+    CHECK_A(snd_pcm_hw_params_set_channels, (as->pcm, hw_params, channel_count));
 
     unsigned int period_time = (long long)sample_frame_count * 1000 * 1000 / sample_rate;
     period_time = CLAMP(period_time,
@@ -364,6 +415,9 @@ alsa_create_stream(audio_stream_direction type, unsigned int sample_rate,
     snd_pcm_sw_params_free(sw_params);
 
     CHECK_A(snd_pcm_prepare, (as->pcm));
+
+    if (direction == STREAM_CAPTURE)
+        CHECK_A(snd_pcm_start, (as->pcm));
 
     as->nfds = snd_pcm_poll_descriptors_count(as->pcm);
     as->fds = calloc(as->nfds, sizeof(struct pollfd));
@@ -392,7 +446,8 @@ audio_stream *
 alsa_create_playback_stream(unsigned int sample_rate, unsigned int sample_frame_count,
                             audio_stream_playback_cb_f *cb, void *cb_user_data)
 {
-    audio_stream *as = alsa_create_stream(STREAM_PLAYBACK, sample_rate, sample_frame_count);
+    audio_stream *as = alsa_create_stream(STREAM_PLAYBACK, sample_rate, sample_frame_count,
+                                          "default");
     if (!as)
         return NULL;
 
@@ -402,11 +457,71 @@ alsa_create_playback_stream(unsigned int sample_rate, unsigned int sample_frame_
 }
 
 static
+char *
+find_pcm_name(const char *device_longname)
+{
+    char *pcm_name = NULL;
+    int   card = -1;
+    int   done = 0;
+
+    if (!device_longname)
+        return strdup("default");
+
+    while (!done) {
+        int err = snd_card_next(&card);
+        if (err != 0)
+            break;
+        if (card == -1)
+            break;
+
+        char *longname = NULL;
+        if (snd_card_get_longname(card, &longname) != 0)
+            goto next_0;
+
+        if (!longname)
+            goto next_0;
+
+        if (strcmp(device_longname, longname) != 0)
+            goto next_2;
+
+        void **hints;
+        if (snd_device_name_hint(card, "pcm", &hints) != 0)
+            goto next_2;
+
+        for (int k = 0; hints[k] != NULL; k ++) {
+            pcm_name = snd_device_name_get_hint(hints[k], "NAME");
+            if (strncmp(pcm_name, "default:", strlen("default:")) == 0) {
+                done = 1;
+                goto next_3;
+            }
+            free(pcm_name);
+            pcm_name = NULL;
+        }
+
+    next_3:
+        snd_device_name_free_hint(hints);
+    next_2:
+        free(longname);
+    next_0:
+        continue;
+    }
+
+    if (!pcm_name)
+        pcm_name = strdup("default");
+
+    return pcm_name;
+}
+
+static
 audio_stream *
 alsa_create_capture_stream(unsigned int sample_rate, unsigned int sample_frame_count,
-                           audio_stream_capture_cb_f *cb, void *cb_user_data)
+                           audio_stream_capture_cb_f *cb, void *cb_user_data,
+                           const char *longname)
 {
-    audio_stream *as = alsa_create_stream(STREAM_CAPTURE, sample_rate, sample_frame_count);
+    char *pcm_name = find_pcm_name(longname);
+    audio_stream *as = alsa_create_stream(STREAM_CAPTURE, sample_rate, sample_frame_count,
+                                          pcm_name);
+    free(pcm_name);
 
     if (!as)
         return NULL;
@@ -414,6 +529,62 @@ alsa_create_capture_stream(unsigned int sample_rate, unsigned int sample_frame_c
     as->capture_cb = cb;
     as->cb_user_data = cb_user_data;
     return as;
+}
+
+static
+audio_device_name *
+alsa_enumerate_capture_devices(void)
+{
+    int     rcard;
+
+    // count cards
+    size_t cnt = 0;
+    rcard = -1;
+    while (1) {
+        int err = snd_card_next(&rcard);
+        if (err != 0)
+            break;
+        if (rcard == -1)
+            break;
+        cnt ++;
+    }
+
+    if (cnt == 0)
+        return NULL;
+
+    audio_device_name *list = calloc(sizeof(audio_device_name), cnt + 1);
+    if (!list)
+        return NULL;
+
+    // fill the list
+    uintptr_t idx = 0;
+    rcard = -1;
+    while (1) {
+        int err = snd_card_next(&rcard);
+        if (err != 0)
+            break;
+        if (rcard == -1)
+            break;
+
+        char *name;
+        if (snd_card_get_name(rcard, &name) == 0 && name != NULL) {
+            list[idx].name = name;
+
+            char *longname;
+            if (snd_card_get_longname(rcard, &longname) == 0 && longname != NULL)
+                list[idx].longname = longname;
+
+            idx ++;
+            if (idx >= cnt)
+                break;
+        }
+    }
+
+    // terminate list
+    list[idx].name = NULL;
+    list[idx].longname = NULL;
+
+    return list;
 }
 
 static
@@ -429,8 +600,9 @@ alsa_destroy_stream(audio_stream *as)
 {
     pthread_mutex_lock(&lock);
     streams_to_delete = g_list_prepend(streams_to_delete, as);
-    wakeup_audio_thread();
     pthread_mutex_unlock(&lock);
+
+    wakeup_audio_thread();
 }
 
 static
@@ -441,9 +613,10 @@ alsa_available(void)
 }
 
 audio_stream_ops audio_alsa = {
-    .available =                alsa_available,
-    .create_playback_stream =   alsa_create_playback_stream,
-    .create_capture_stream =    alsa_create_capture_stream,
-    .pause =                    alsa_pause_stream,
-    .destroy =                  alsa_destroy_stream,
+    .available =                    alsa_available,
+    .create_playback_stream =       alsa_create_playback_stream,
+    .create_capture_stream =        alsa_create_capture_stream,
+    .enumerate_capture_devices =    alsa_enumerate_capture_devices,
+    .pause =                        alsa_pause_stream,
+    .destroy =                      alsa_destroy_stream,
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -27,6 +27,8 @@
 
 #include <ppapi/c/ppb_var.h>
 #include <ppapi/c/ppb_var_array_buffer.h>
+#include <ppapi/c/ppb_var_array.h>
+#include <ppapi/c/ppb_var_dictionary.h>
 #include <ppapi/c/dev/ppb_var_deprecated.h>
 #include <string.h>
 #include <npapi/npapi.h>
@@ -115,5 +117,39 @@ ppb_var_array_buffer_map(struct PP_Var var);
 
 void
 ppb_var_array_buffer_unmap(struct PP_Var var);
+
+struct PP_Var
+ppb_var_dictionary_create(void);
+
+struct PP_Var
+ppb_var_dictionary_get(struct PP_Var dict, struct PP_Var key);
+
+PP_Bool
+ppb_var_dictionary_set(struct PP_Var dict, struct PP_Var key, struct PP_Var value);
+
+void
+ppb_var_dictionary_delete(struct PP_Var dict, struct PP_Var key);
+
+PP_Bool
+ppb_var_dictionary_has_key(struct PP_Var dict, struct PP_Var key);
+
+struct PP_Var
+ppb_var_dictionary_get_keys(struct PP_Var dict);
+
+struct PP_Var
+ppb_var_array_create(void);
+
+struct PP_Var
+ppb_var_array_get(struct PP_Var array, uint32_t index);
+
+PP_Bool
+ppb_var_array_set(struct PP_Var array, uint32_t index, struct PP_Var value);
+
+uint32_t
+ppb_var_array_get_length(struct PP_Var array);
+
+PP_Bool
+ppb_var_array_set_length(struct PP_Var array, uint32_t length);
+
 
 #endif // FPP_PPB_VAR_H

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -34,6 +34,7 @@ const char *pepperflash_path_list[] = {
     "/usr/lib64/PepperFlash",                   // chromium-pepperflash-plugin (Slackware)
     "/usr/lib/chromium-browser/PepperFlash",    // chrome-binary-plugins (Gentoo/Sabayon)
     "/usr/lib64/chromium-browser/PepperFlash",  // chrome-binary-plugins (Gentoo/Sabayon)
+    "/usr/lib/adobe-flashplugin",               // adobe-flashplugin (Ubuntu)
     NULL,
 };
 
@@ -84,4 +85,10 @@ uintptr_t
 fpp_config_plugin_has_manifest(void)
 {
     return 1;
+}
+
+void
+fpp_config_detect_plugin_specific_quirks(void)
+{
+    config.quirks.connect_first_loader_to_unrequested_stream = 1;
 }

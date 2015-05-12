@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -40,6 +40,7 @@
 #include "tables.h"
 #include "eintr_retry.h"
 #include "ppb_url_request_info.h"
+#include "config.h"
 
 
 PP_Resource
@@ -88,6 +89,14 @@ ppb_url_loader_destroy(void *p)
 
     post_data_free(ul->post_data);
     ul->post_data = NULL;
+
+    while (ul->read_tasks) {
+        GList *llink = g_list_first(ul->read_tasks);
+        struct url_loader_read_task_s *rt = llink->data;
+        ul->read_tasks = g_list_delete_link(ul->read_tasks, llink);
+
+        g_slice_free1(sizeof(*rt), rt);
+    }
 }
 
 PP_Bool
@@ -211,8 +220,8 @@ err:
     }
 
 quit:
-    ppb_message_loop_post_quit_depth(p->m_loop, PP_FALSE, p->depth);
     ppb_core_release_resource(p->loader);
+    ppb_message_loop_post_quit_depth(p->m_loop, PP_FALSE, p->depth);
 }
 
 static
@@ -220,7 +229,7 @@ void
 url_loader_open_comt(void *user_data, int32_t result)
 {
     struct url_loader_open_param_s *p = user_data;
-    ppb_core_call_on_browser_thread(url_loader_open_ptac, p);
+    ppb_core_call_on_browser_thread(0, url_loader_open_ptac, p);
 }
 
 int
@@ -314,6 +323,14 @@ ppb_url_loader_open_target(PP_Resource loader, PP_Resource request_info,
     ppb_var_release(full_url);
     pp_resource_release(request_info);
 
+    if (config.quirks.connect_first_loader_to_unrequested_stream) {
+        if (ul->instance->content_url_loader == 0) {
+            ul->instance->content_url_loader = loader;
+            pp_resource_release(loader);
+            return PP_OK_COMPLETIONPENDING;
+        }
+    }
+
     struct url_loader_open_param_s *p = g_slice_alloc(sizeof(*p));
     p->url =                ul->url;
     p->loader =             loader;
@@ -331,7 +348,8 @@ ppb_url_loader_open_target(PP_Resource loader, PP_Resource request_info,
     ppb_core_add_ref_resource(loader);  // add ref to ensure data in ul remain accessible
     pp_resource_release(loader);
 
-    ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(url_loader_open_comt, p), 0);
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(url_loader_open_comt, p), 0, PP_OK,
+                                           p->depth, __func__);
     ppb_message_loop_run_nested(p->m_loop);
 
     int retval = p->retval;
@@ -412,7 +430,8 @@ ppb_url_loader_follow_redirect(PP_Resource loader, struct PP_CompletionCallback 
     ppb_core_add_ref_resource(loader);  // add ref to ensure data in ul remain accessible
     pp_resource_release(loader);
 
-    ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(url_loader_open_comt, p), 0);
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(url_loader_open_comt, p), 0, PP_OK,
+                                           p->depth, __func__);
     ppb_message_loop_run_nested(p->m_loop);
 
     int retval = p->retval;
@@ -508,6 +527,7 @@ int32_t
 ppb_url_loader_read_response_body(PP_Resource loader, void *buffer, int32_t bytes_to_read,
                                   struct PP_CompletionCallback callback)
 {
+    struct url_loader_read_task_s *rt;
     int32_t read_bytes = PP_ERROR_FAILED;
     struct pp_url_loader_s *ul = pp_resource_acquire(loader, PP_RESOURCE_URL_LOADER);
     if (!ul) {
@@ -515,35 +535,49 @@ ppb_url_loader_read_response_body(PP_Resource loader, void *buffer, int32_t byte
         return PP_ERROR_BADRESOURCE;
     }
 
-    if (ul->fd >= 0) {
-        read_bytes = -1;
-        off_t ofs = lseek(ul->fd, ul->read_pos, SEEK_SET);
-        if (ofs != (off_t)-1)
-            read_bytes = RETRY_ON_EINTR(read(ul->fd, buffer, bytes_to_read));
-
-        if (read_bytes < 0)
-            read_bytes = PP_ERROR_FAILED;
-        else
-            ul->read_pos += read_bytes;
+    if (ul->fd == -1) {
+        trace_error("%s, fd==-1\n", __func__);
+        pp_resource_release(loader);
+        return PP_ERROR_FAILED;
     }
+
+    if (ul->read_tasks) {
+        // schedule task instead of immediate reading if there is another task
+        // in the queue already
+        goto schedule_read_task;
+    }
+
+    read_bytes = -1;
+    off_t ofs = lseek(ul->fd, ul->read_pos, SEEK_SET);
+    if (ofs != (off_t)-1)
+        read_bytes = RETRY_ON_EINTR(read(ul->fd, buffer, bytes_to_read));
+
+    if (read_bytes < 0)
+        read_bytes = PP_ERROR_FAILED;
+    else
+        ul->read_pos += read_bytes;
 
     if (read_bytes == 0 && !ul->finished_loading) {
         // no data ready, schedule read task
-        struct url_loader_read_task_s *rt = g_slice_alloc(sizeof(*rt));
-        rt->buffer = buffer;
-        rt->bytes_to_read = bytes_to_read;
-        rt->ccb = callback;
-
-        ul->read_tasks = g_list_append(ul->read_tasks, rt);
-        pp_resource_release(loader);
-        return PP_OK_COMPLETIONPENDING;
+        goto schedule_read_task;
     }
 
     pp_resource_release(loader);
     if (callback.flags & PP_COMPLETIONCALLBACK_FLAG_OPTIONAL)
         return read_bytes;
 
-    ppb_core_call_on_main_thread(0, callback, read_bytes);
+    ppb_core_call_on_main_thread2(0, callback, read_bytes, __func__);
+    return PP_OK_COMPLETIONPENDING;
+
+schedule_read_task:
+    rt = g_slice_alloc(sizeof(*rt));
+    rt->url_loader =    loader;
+    rt->buffer =        buffer;
+    rt->bytes_to_read = bytes_to_read;
+    rt->ccb =           callback;
+
+    ul->read_tasks = g_list_append(ul->read_tasks, rt);
+    pp_resource_release(loader);
     return PP_OK_COMPLETIONPENDING;
 }
 
@@ -591,7 +625,7 @@ ppb_url_loader_close(PP_Resource loader)
 void
 ppb_url_loader_grant_universal_access(PP_Resource loader)
 {
-    // TODO: do something
+    trace_info_f("      no-op implementation, all request are always allowed\n");
     return;
 }
 
@@ -698,7 +732,7 @@ TRACE_WRAPPER
 void
 trace_ppb_url_loader_grant_universal_access(PP_Resource loader)
 {
-    trace_info("[PPB] {fake} %s loader=%d\n", __func__+6, loader);
+    trace_info("[PPB] {full} %s loader=%d\n", __func__+6, loader);
     ppb_url_loader_grant_universal_access(loader);
 }
 
@@ -726,6 +760,6 @@ const struct PPB_URLLoader_1_0 ppb_url_loader_interface_1_0 = {
 };
 
 const struct PPB_URLLoaderTrusted_0_3 ppb_url_loader_trusted_interface_0_3 = {
-    .GrantUniversalAccess =     TWRAPZ(ppb_url_loader_grant_universal_access),
+    .GrantUniversalAccess =     TWRAPF(ppb_url_loader_grant_universal_access),
     .RegisterStatusCallback =   TWRAPZ(ppb_url_loader_register_status_callback),
 };

@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -57,7 +57,7 @@ ppb_message_loop_create(PP_Instance instance)
 
     ml->async_q = g_async_queue_new();
     ml->int_q = g_queue_new();
-    ml->depth = 1;
+    ml->depth = 0;  // running loop will always have depth > 0
 
     pp_resource_release(message_loop);
     return message_loop;
@@ -167,6 +167,7 @@ struct message_loop_task_s {
     struct timespec                 when;
     int                             terminate;
     int                             depth;
+    const char                     *origin;     ///< name of the function that scheduled the task
     struct PP_CompletionCallback    ccb;
     int32_t                         result_to_pass;
     PP_Bool                         should_destroy_ml;
@@ -193,6 +194,7 @@ time_compare_func(gconstpointer a, gconstpointer b, gpointer user_data)
 int32_t
 ppb_message_loop_run(PP_Resource message_loop)
 {
+    // first actual depth will be 1.
     return ppb_message_loop_run_int(message_loop, ML_INCREASE_DEPTH);
 }
 
@@ -290,7 +292,8 @@ ppb_message_loop_run_int(PP_Resource message_loop, uint32_t flags)
                 }
 
                 if (task->terminate) {
-                    if (depth > 1) {
+                    // if depth > 1 or loop was reentered with no depth increase, it's a nested loop
+                    if (depth > 1 || !(flags & ML_INCREASE_DEPTH)) {
                         // exit at once, all remaining task will be processed by outer loop
                         g_slice_free(struct message_loop_task_s, task);
                         break;
@@ -312,7 +315,13 @@ ppb_message_loop_run_int(PP_Resource message_loop, uint32_t flags)
                 // run task
                 const struct PP_CompletionCallback ccb = task->ccb;
                 if (ccb.func) {
+                    trace_info_f("   calling callback={.func=%p, .user_data=%p, .flags=%d}, "
+                                 "result=%d, origin=%s\n", ccb.func, ccb.user_data, ccb.flags,
+                                 task->result_to_pass, task->origin);
                     ccb.func(ccb.user_data, task->result_to_pass);
+                    trace_info_f("   returning from callback={.func=%p, .user_data=%p, .flags=%d}, "
+                                 "result=%d, origin=%s\n", ccb.func, ccb.user_data, ccb.flags,
+                                 task->result_to_pass, task->origin);
                 }
 
                 // free task
@@ -327,7 +336,7 @@ ppb_message_loop_run_int(PP_Resource message_loop, uint32_t flags)
             break;
         }
 
-        task = g_async_queue_timeout_pop_compat(async_q, timeout);
+        task = g_async_queue_timeout_pop(async_q, timeout);
         if (task)
             g_queue_insert_sorted(int_q, task, time_compare_func, NULL);
     }
@@ -353,7 +362,7 @@ ppb_message_loop_run_int(PP_Resource message_loop, uint32_t flags)
 int32_t
 ppb_message_loop_post_work_with_result(PP_Resource message_loop,
                                        struct PP_CompletionCallback callback, int64_t delay_ms,
-                                       int32_t result_to_pass, int depth)
+                                       int32_t result_to_pass, int depth, const char *origin)
 {
     if (callback.func == NULL) {
         trace_error("%s, callback.func == NULL\n", __func__);
@@ -366,11 +375,16 @@ ppb_message_loop_post_work_with_result(PP_Resource message_loop,
         return PP_ERROR_BADRESOURCE;
     }
 
-    if (ml->running && ml->teardown) {
-        // message loop is in a teardown state
-        pp_resource_release(message_loop);
-        trace_error("%s, quit request received, no additional work could be posted\n", __func__);
-        return PP_ERROR_FAILED;
+    // forbid pushing task when message loop is in teardown state,
+    // but only if it's not a browser thread message loop
+    if (message_loop != ppb_message_loop_get_for_browser_thread()) {
+        if (ml->running && ml->teardown) {
+            // message loop is in a teardown state
+            pp_resource_release(message_loop);
+            trace_error("%s, quit request received, no additional work could be posted\n",
+                        __func__);
+            return PP_ERROR_FAILED;
+        }
     }
 
     struct message_loop_task_s *task = g_slice_alloc0(sizeof(*task));
@@ -378,6 +392,7 @@ ppb_message_loop_post_work_with_result(PP_Resource message_loop,
     task->result_to_pass = result_to_pass;
     task->ccb = callback;
     task->depth = depth;
+    task->origin = origin;
 
     // calculate absolute time callback should be run at
     clock_gettime(CLOCK_REALTIME, &task->when);
@@ -397,7 +412,8 @@ int32_t
 ppb_message_loop_post_work(PP_Resource message_loop, struct PP_CompletionCallback callback,
                            int64_t delay_ms)
 {
-    return ppb_message_loop_post_work_with_result(message_loop, callback, delay_ms, PP_OK, 0);
+    return ppb_message_loop_post_work_with_result(message_loop, callback, delay_ms, PP_OK, 0,
+                                                  __func__);
 }
 
 int32_t

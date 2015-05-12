@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -39,6 +39,7 @@
 #include "ppb_browser_font.h"
 #include "ppb_audio_config.h"
 #include "ppb_audio.h"
+#include "ppb_device_ref.h"
 #include "ppb_input_event.h"
 #include "ppb_flash_font_file.h"
 #include "ppb_flash_menu.h"
@@ -55,6 +56,8 @@
 #include "ppb_file_chooser.h"
 #include "ppb_udp_socket.h"
 #include "ppb_x509_certificate.h"
+#include "ppb_font.h"
+#include "ppb_host_resolver.h"
 
 
 static GHashTable      *res_tbl;
@@ -270,6 +273,15 @@ pp_resource_unref(PP_Resource resource)
         case PP_RESOURCE_X509_CERTIFICATE:
             ppb_x509_certificate_destroy(ptr);
             break;
+        case PP_RESOURCE_FONT:
+            ppb_font_destroy(ptr);
+            break;
+        case PP_RESOURCE_DEVICE_REF:
+            ppb_device_ref_destroy(ptr);
+            break;
+        case PP_RESOURCE_HOST_RESOLVER:
+            ppb_host_resolver_destroy(ptr);
+            break;
         default:
             break;
         }
@@ -292,7 +304,8 @@ pp_resource_unref(PP_Resource resource)
 
                 trace_error("-- %10lu ------------\n", (unsigned long)current_time);
                 for (int k = 0; k < PP_RESOURCE_TYPES_COUNT; k ++)
-                    trace_error("counts[%2d] = %d\n", k, counts[k]);
+                    if (counts[k] > 0)
+                        trace_error("counts[%2d] = %d\n", k, counts[k]);
                 if (counts[PP_RESOURCE_TYPES_COUNT] > 0)
                     trace_error("%d unknown resources (should never happen)\n",
                                 counts[PP_RESOURCE_TYPES_COUNT]);

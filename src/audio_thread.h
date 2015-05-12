@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -33,6 +33,11 @@ typedef enum {
     STREAM_CAPTURE,
 } audio_stream_direction;
 
+typedef struct {
+    char *name;
+    char *longname;
+} audio_device_name;
+
 typedef struct audio_stream_s audio_stream;
 
 typedef void
@@ -50,7 +55,14 @@ typedef audio_stream *
 
 typedef audio_stream *
 (audio_create_capture_stream_f)(unsigned int sample_rate, unsigned int sample_frame_count,
-                                audio_stream_capture_cb_f *cb, void *cb_user_data);
+                                audio_stream_capture_cb_f *cb, void *cb_user_data,
+                                const char *device_longname);
+
+/// returns NULL-terminated array of device names
+///
+/// caller should free memory by calling audio_capture_device_list_free()
+typedef audio_device_name *
+(audio_enumerate_capture_devices_f)(void);
 
 typedef void
 (audio_pause_stream_f)(audio_stream *s, int enabled);
@@ -59,16 +71,20 @@ typedef void
 (audio_destroy_stream_f)(audio_stream *s);
 
 typedef struct {
-    audio_available_f              *available;
-    audio_create_playback_stream_f *create_playback_stream;
-    audio_create_capture_stream_f  *create_capture_stream;
-    audio_pause_stream_f           *pause;
-    audio_destroy_stream_f         *destroy;
+    audio_available_f                  *available;
+    audio_create_playback_stream_f     *create_playback_stream;
+    audio_create_capture_stream_f      *create_capture_stream;
+    audio_enumerate_capture_devices_f  *enumerate_capture_devices;
+    audio_pause_stream_f               *pause;
+    audio_destroy_stream_f             *destroy;
 } audio_stream_ops;
 
 
 audio_stream_ops *
 audio_select_implementation(void);
+
+void
+audio_capture_device_list_free(audio_device_name *list);
 
 
 #endif // FPP_AUDIO_THREAD_H

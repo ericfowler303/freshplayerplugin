@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -98,7 +98,7 @@ static
 void
 p2n_has_method_prepare_comt(void *user_data, int32_t result)
 {
-    ppb_core_call_on_main_thread(0, PP_MakeCCB(p2n_has_method_comt, user_data), PP_OK);
+    ppb_core_trampoline_to_main_thread(PP_MakeCCB(p2n_has_method_comt, user_data), PP_OK, __func__);
 }
 
 bool
@@ -116,7 +116,9 @@ p2n_has_method(NPObject *npobj, NPIdentifier name)
         p->m_loop =     ppb_message_loop_get_for_browser_thread();
         p->depth =      ppb_message_loop_get_depth(p->m_loop) + 1;
 
-        ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(p2n_has_method_prepare_comt, p), 0);
+        ppb_message_loop_post_work_with_result(p->m_loop,
+                                               PP_MakeCCB(p2n_has_method_prepare_comt, p), 0, PP_OK,
+                                               0, __func__);
         ppb_message_loop_run_nested(p->m_loop);
 
         bool result = p->result;
@@ -182,7 +184,7 @@ static
 void
 p2n_invoke_prepare_comt(void *user_data, int32_t result)
 {
-    ppb_core_call_on_main_thread(0, PP_MakeCCB(p2n_invoke_comt, user_data), PP_OK);
+    ppb_core_trampoline_to_main_thread(PP_MakeCCB(p2n_invoke_comt, user_data), PP_OK, __func__);
 }
 
 bool
@@ -204,7 +206,8 @@ p2n_invoke(NPObject *npobj, NPIdentifier name, const NPVariant *args, uint32_t a
         p->m_loop =     ppb_message_loop_get_for_browser_thread();
         p->depth =      ppb_message_loop_get_depth(p->m_loop) + 1;
 
-        ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(p2n_invoke_prepare_comt, p), 0);
+        ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(p2n_invoke_prepare_comt, p),
+                                               0, PP_OK, 0, __func__);
         ppb_message_loop_run_nested(p->m_loop);
         bool result = p->result;
         npn.memfree(p->name);
@@ -250,7 +253,8 @@ static
 void
 p2n_has_property_prepare_comt(void *user_data, int32_t result)
 {
-    ppb_core_call_on_main_thread(0, PP_MakeCCB(p2n_has_property_comt, user_data), PP_OK);
+    ppb_core_trampoline_to_main_thread(PP_MakeCCB(p2n_has_property_comt, user_data), PP_OK,
+                                       __func__);
 }
 
 bool
@@ -268,7 +272,9 @@ p2n_has_property(NPObject *npobj, NPIdentifier name)
         p->m_loop =     ppb_message_loop_get_for_browser_thread();
         p->depth =      ppb_message_loop_get_depth(p->m_loop) + 1;
 
-        ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(p2n_has_property_prepare_comt, p), 0);
+        ppb_message_loop_post_work_with_result(p->m_loop,
+                                               PP_MakeCCB(p2n_has_property_prepare_comt, p), 0,
+                                               PP_OK, 0, __func__);
         ppb_message_loop_run_nested(p->m_loop);
 
         bool result = p->result;
@@ -311,7 +317,8 @@ static
 void
 p2n_get_property_prepare_comt(void *user_data, int32_t result)
 {
-    ppb_core_call_on_main_thread(0, PP_MakeCCB(p2n_get_property_comt, user_data), PP_OK);
+    ppb_core_trampoline_to_main_thread(PP_MakeCCB(p2n_get_property_comt, user_data), PP_OK,
+                                       __func__);
 }
 
 bool
@@ -330,7 +337,9 @@ p2n_get_property(NPObject *npobj, NPIdentifier name, NPVariant *np_result)
         p->m_loop =     ppb_message_loop_get_for_browser_thread();
         p->depth =      ppb_message_loop_get_depth(p->m_loop) + 1;
 
-        ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(p2n_get_property_prepare_comt, p), 0);
+        ppb_message_loop_post_work_with_result(p->m_loop,
+                                               PP_MakeCCB(p2n_get_property_prepare_comt, p), 0,
+                                               PP_OK, 0, __func__);
         ppb_message_loop_run_nested(p->m_loop);
         bool result = p->result;
         npn.memfree(p->name);
@@ -383,7 +392,7 @@ static
 void
 p2n_enumerate_prepare_comt(void *user_data, int32_t result)
 {
-    ppb_core_call_on_main_thread(0, PP_MakeCCB(p2n_enumerate_comt, user_data), PP_OK);
+    ppb_core_trampoline_to_main_thread(PP_MakeCCB(p2n_enumerate_comt, user_data), PP_OK, __func__);
 }
 
 bool
@@ -395,7 +404,8 @@ p2n_enumerate(NPObject *npobj, NPIdentifier **value, uint32_t *count)
         p->m_loop =     ppb_message_loop_get_for_browser_thread();
         p->depth =      ppb_message_loop_get_depth(p->m_loop) + 1;
 
-        ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(p2n_enumerate_prepare_comt, p), 0);
+        ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(p2n_enumerate_prepare_comt, p),
+                                               0, PP_OK, 0, __func__);
         ppb_message_loop_run_nested(p->m_loop);
         bool result = p->result;
         *count = p->count;
@@ -407,11 +417,18 @@ p2n_enumerate(NPObject *npobj, NPIdentifier **value, uint32_t *count)
             const char *s = ppb_var_var_to_utf8(p->values[k], &len);
 
             // make zero-terminated string
-            tmpbuf = realloc(tmpbuf, len + 1);
+            char *ptr = realloc(tmpbuf, len + 1);
+            if (!ptr) {
+                result = false;
+                goto err;
+            }
+            tmpbuf = ptr;
             memcpy(tmpbuf, s, len);
             tmpbuf[len] = 0;
             value[k] = npn.getstringidentifier(tmpbuf);
         }
+
+    err:
         free(tmpbuf);
         g_slice_free1(sizeof(*p), p);
 

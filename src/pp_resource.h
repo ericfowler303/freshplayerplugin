@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -32,14 +32,21 @@
 #include <ppapi/c/pp_rect.h>
 #include <ppapi/c/pp_resource.h>
 #include <ppapi/c/private/pp_private_font_charset.h>
+#include <ppapi/c/private/ppb_net_address_private.h>
 #include <ppapi/c/ppb_image_data.h>
 #include <ppapi/c/ppb_input_event.h>
 #include <ppapi/c/ppb_audio_config.h>
 #include <ppapi/c/ppb_audio.h>
+#include <ppapi/c/dev/ppb_audio_input_dev.h>
+#include <ppapi/c/dev/ppb_device_ref_dev.h>
 #include <ppapi/c/dev/ppb_file_chooser_dev.h>
+#include <ppapi/c/dev/ppb_text_input_dev.h>
+#include <ppapi/c/dev/ppp_text_input_dev.h>
+#include <ppapi/c/dev/ppp_video_capture_dev.h>
 
 #include <stdlib.h>
 #include <X11/Xlib.h>
+#include <X11/extensions/Xrender.h>
 #include <npapi/npapi.h>
 #include <npapi/npruntime.h>
 #include <pthread.h>
@@ -54,6 +61,7 @@
 #include <gtk/gtk.h>
 #include "audio_thread.h"
 #include <openssl/x509.h>
+#include "font.h"
 
 
 #define free_and_nullify(item)          \
@@ -97,6 +105,9 @@ enum pp_resource_type_e {
     PP_RESOURCE_FILE_CHOOSER,
     PP_RESOURCE_UDP_SOCKET,
     PP_RESOURCE_X509_CERTIFICATE,
+    PP_RESOURCE_FONT,
+    PP_RESOURCE_DEVICE_REF,
+    PP_RESOURCE_HOST_RESOLVER,
 
     PP_RESOURCE_TYPES_COUNT,        // must be the last item in the list
 };
@@ -121,20 +132,26 @@ struct pp_instance_s {
     const struct PPP_Instance_1_1  *ppp_instance_1_1;
     const struct PPP_InputEvent_0_1 *ppp_input_event;
     const struct PPP_Instance_Private_0_1 *ppp_instance_private;
-    NPObject                       *scriptable_obj;
+    const struct PPP_TextInput_Dev_0_1    *ppp_text_input_dev;
+    struct PP_Var                   scriptable_pp_obj;
     NPObject                       *np_window_obj;
     NPObject                       *np_plugin_element_obj;
     uint32_t                        event_mask;
     uint32_t                        filtered_event_mask;
     Window                          wnd;
+    GtkWidget                      *catcher_widget; ///< catches keypresses returned from IME
     PP_Instance                     id;
     NPP                             npp;
     uint32_t                        is_fullframe;
     uint32_t                        is_fullscreen;
     uint32_t                        is_transparent;
+    uint32_t                        windowed_mode;
+    uint32_t                        use_xembed;
     uint32_t                        incognito_mode;
     volatile gint                   instance_loaded;
     uint32_t                        ignore_focus_events_cnt; ///< number of focus events to ignore
+    PP_Resource                     content_url_loader;
+    uint32_t                        content_url_loader_used;
 
     Cursor                          prev_cursor;
     int                             have_prev_cursor;
@@ -148,12 +165,14 @@ struct pp_instance_s {
     // geometry
     uint32_t                        width;
     uint32_t                        height;
+    int32_t                         offset_x;   ///< relative to a browser window top left corner
+    int32_t                         offset_y;   ///< relative to a browser window top left corner
 
     int                             argc;
     char                          **argn;
     char                          **argv;
 
-    struct PP_Var                   instance_url;
+    struct PP_Var                   instance_url;           ///< absolute instance url
     struct PP_Var                   document_url;
     struct PP_Var                   document_base_url;
     pthread_t                       main_thread;
@@ -162,8 +181,13 @@ struct pp_instance_s {
     // graphics2d and graphics3d
     PP_Resource                     graphics;
     struct PP_CompletionCallback    graphics_ccb;
-    pthread_barrier_t               graphics_barrier;
     uint32_t                        graphics_in_progress;
+
+    // input method context
+    PP_TextInput_Type_Dev           textinput_type;
+    GtkIMContext                   *im_context;
+    GtkIMContext                   *im_context_multi;
+    GtkIMContext                   *im_context_simple;
 };
 
 
@@ -212,6 +236,7 @@ struct pp_url_loader_s {
 };
 
 struct url_loader_read_task_s {
+    PP_Resource                     url_loader;
     void                           *buffer;
     int32_t                         bytes_to_read;
     struct PP_CompletionCallback    ccb;
@@ -250,24 +275,16 @@ struct pp_view_s {
 
 struct pp_graphics3d_s {
     COMMON_STRUCTURE_FIELDS
-    GLXContext      glc;
-    GLXFBConfig     fb_config;
-    GLXContext      glc_t;          ///< presentation context for transparent instances
-    GLXFBConfig     fb_config_t;
-    Pixmap          pixmap;
-    GLXPixmap       glx_pixmap;
-    int32_t         width;
-    int32_t         height;
-    GHashTable     *sub_maps;
-    GLuint          tex_front;      ///< transparency helper texture, plugin data
-    GLuint          tex_back;       ///< transparency helper texture, previous drawable contents
-
-    struct {
-        GLuint      id;
-        GLuint      attrib_pos;
-        GLint       uniform_tex_back;
-        GLint       uniform_tex_front;
-    } prog;                                     ///< alpha blending GL program
+    GLXContext          glc;
+    GLXFBConfig         fb_config;
+    int32_t             depth;          ///< depth of the pixmap, 32 for transparent, 24 otherwise
+    Pixmap              pixmap;
+    GLXPixmap           glx_pixmap;
+    Picture             xr_pict;
+    XRenderPictFormat  *xr_pictfmt;
+    int32_t             width;
+    int32_t             height;
+    GHashTable         *sub_maps;
 };
 
 struct pp_image_data_s {
@@ -302,11 +319,7 @@ struct pp_network_monitor_s {
 
 struct pp_browser_font_s {
     COMMON_STRUCTURE_FIELDS
-    PangoFont              *font;
-    PangoFontDescription   *font_desc;
-    int32_t                 letter_spacing;
-    int32_t                 word_spacing;
-    int32_t                 family;
+    struct fpp_font         ff;
 };
 
 struct pp_audio_config_s {
@@ -340,8 +353,13 @@ struct pp_input_event_s {
     struct PP_FloatPoint        wheel_ticks;
     PP_Bool                     scroll_by_page;
     uint32_t                    key_code;
-    struct PP_Var               character_text;
     struct PP_Var               code;
+    struct PP_Var               text;
+    uint32_t                    segment_number;
+    uint32_t                   *segment_offsets;
+    int32_t                     target_segment;
+    uint32_t                    selection_start;
+    uint32_t                    selection_end;
 };
 
 struct pp_flash_font_file_s {
@@ -357,10 +375,29 @@ struct pp_printing_s {
 
 struct pp_video_capture_s {
     COMMON_STRUCTURE_FIELDS
+    int                 fd;
+    uint32_t            width;
+    uint32_t            height;
+    uint32_t            fps;
+    size_t              buffer_size;
+    uint32_t            buffer_count;
+    PP_Resource        *buffers;
+    char               *buffer_is_free;
+    pthread_t           thread;
+    uint32_t            thread_started;
+    uint32_t            terminate_thread;
+    const struct PPP_VideoCapture_Dev_0_1 *ppp_video_capture_dev;
 };
 
 struct pp_audio_input_s {
     COMMON_STRUCTURE_FIELDS
+    uint32_t                    sample_rate;
+    uint32_t                    sample_frame_count;
+    PPB_AudioInput_Callback_0_3 cb_0_3;
+    PPB_AudioInput_Callback     cb_0_4;
+    void                       *cb_user_data;
+    audio_stream_ops           *stream_ops;
+    audio_stream               *stream;
 };
 
 struct pp_flash_menu_s {
@@ -426,12 +463,38 @@ struct pp_file_chooser_s {
 
 struct pp_udp_socket_s {
     COMMON_STRUCTURE_FIELDS
-    int             sock;
+    int                             sock;
+    int                             bound;
+    int                             seen_eof;
+    int                             destroyed;
+    struct PP_NetAddress_Private    addr;
+    struct PP_NetAddress_Private    addr_from;
 };
 
 struct pp_x509_certificate_s {
     COMMON_STRUCTURE_FIELDS
     X509           *cert;
+    char           *raw_data;
+    uint32_t        raw_data_length;
+};
+
+struct pp_font_s {
+    COMMON_STRUCTURE_FIELDS
+    struct fpp_font         ff;
+};
+
+struct pp_device_ref_s {
+    COMMON_STRUCTURE_FIELDS
+    struct PP_Var           name;
+    struct PP_Var           longname;
+    PP_DeviceType_Dev       type;
+};
+
+struct pp_host_resolver_s {
+    COMMON_STRUCTURE_FIELDS
+    char                           *host;
+    struct PP_NetAddress_Private   *addrs;
+    uint32_t                        addr_count;
 };
 
 union pp_largest_u {
@@ -465,6 +528,9 @@ union pp_largest_u {
     struct pp_file_chooser_s        s29;
     struct pp_udp_socket_s          s30;
     struct pp_x509_certificate_s    s31;
+    struct pp_font_s                s32;
+    struct pp_device_ref_s          s33;
+    struct pp_host_resolver_s       s34;
 };
 
 PP_Resource             pp_resource_allocate(enum pp_resource_type_e type,

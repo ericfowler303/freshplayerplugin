@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -29,6 +29,7 @@
 #include <glib.h>
 #include <gio/gio.h>
 #include "trace.h"
+#include "config.h"
 #include "compat.h"
 
 
@@ -43,6 +44,10 @@
 #define KS_SERVICE      "org.kde.screensaver"
 #define KS_PATH         "/ScreenSaver"
 #define KS_INTERFACE    "org.kde.screensaver"
+
+#define CINNAMON_SERVICE    "org.cinnamon.ScreenSaver"
+#define CINNAMON_PATH       "/"
+#define CINNAMON_INTERFACE  "org.cinnamon.ScreenSaver"
 
 
 #if HAVE_GLIB_DBUS
@@ -66,7 +71,7 @@ find_xscreensaver_window(Display *dpy)
         return 0;
     }
 
-    Atom XA_SCREENSAVER_VERSION = XInternAtom (dpy, "_SCREENSAVER_VERSION", False);
+    Atom XA_SCREENSAVER_VERSION = XInternAtom(dpy, "_SCREENSAVER_VERSION", False);
 
     wnd = None;
     for (unsigned int k = 0; k < nchildren; k ++) {
@@ -79,9 +84,13 @@ find_xscreensaver_window(Display *dpy)
         status = XGetWindowProperty(dpy, children[k], XA_SCREENSAVER_VERSION, 0, 200, False,
                                     XA_STRING, &type, &format, &nitems, &bytes_after, &prop);
         // relying on error handler already set
-        if (status == Success && type != None) {
-            wnd = children[k];
-            goto done;
+        if (status == Success) {
+            if (prop)
+                XFree(prop);
+            if (type != None) {
+                wnd = children[k];
+                goto done;
+            }
         }
     }
 
@@ -92,6 +101,34 @@ done:
 }
 
 static
+int
+is_xscreensaver_active(Display *dpy)
+{
+    Atom           XA_SCREENSAVER_STATUS = XInternAtom(dpy, "_SCREENSAVER_STATUS", False);
+    Atom           type;
+    Atom          *data;
+    int            format;
+    unsigned long  nitems, bytesafter;
+    Status         status;
+    int            screen = 0;  // XScreenSaver always uses screen 0
+
+    status = XGetWindowProperty(dpy, RootWindow(dpy, screen), XA_SCREENSAVER_STATUS, 0, 200, False,
+                                XA_INTEGER, &type, &format, &nitems, &bytesafter,
+                                (unsigned char **)&data);
+
+    if (status == Success && type == XA_INTEGER && nitems >= 3) {
+        if (data[0] != 0) {
+            // is active if data[0] equals XA_BLANK or XA_LOCK
+            return 1;
+        }
+
+        return 0;
+    }
+
+    return 0;
+}
+
+static
 void
 deactivate_xscreensaver(Display *dpy)
 {
@@ -99,6 +136,11 @@ deactivate_xscreensaver(Display *dpy)
 
     if (!xssw) {
         trace_warning("%s, no XScreenSaver's window found\n", __func__);
+        return;
+    }
+
+    if (is_xscreensaver_active(dpy)) {
+        // XScreenSaver already active, deactivating timer makes no sense
         return;
     }
 
@@ -127,6 +169,58 @@ deactivate_xscreensaver(Display *dpy)
 
 #if HAVE_GLIB_DBUS
 static
+int
+is_dbus_based_screensaver_active(const char *d_service, const char *d_path,
+                                 const char *d_interface)
+{
+    GDBusMessage *msg = NULL;
+    GDBusMessage *reply = NULL;
+    uint32_t ret = 0;
+
+    assert(connection);
+
+    // detect is screen saver already active
+    msg = g_dbus_message_new_method_call(d_service, d_path, d_interface, "GetActive");
+    if (!msg) {
+        trace_error("%s, can't allocate GDBusMessage\n", __func__);
+        goto err;
+    }
+
+    GError *error = NULL;
+    reply = g_dbus_connection_send_message_with_reply_sync(connection, msg,
+                                                           G_DBUS_SEND_MESSAGE_FLAGS_NONE, -1,
+                                                           NULL, NULL, &error);
+    if (error) {
+        trace_error("%s, can't send message, %s\n", __func__, error->message);
+        g_clear_error(&error);
+        goto err;
+    }
+
+    g_dbus_connection_flush_sync(connection, NULL, &error);
+    if (error != NULL) {
+        trace_error("%s, can't flush dbus connection, %s\n", __func__, error->message);
+        g_clear_error(&error);
+        goto err;
+    }
+
+    GVariant *v = g_dbus_message_get_body(reply);
+    v = g_variant_get_child_value(v, 0);
+    ret = g_variant_get_boolean(v);
+
+err:
+    if (reply)
+        g_object_unref(reply);
+
+    if (msg)
+        g_object_unref(msg);
+
+    return ret;
+}
+
+#endif // HAVE_GLIB_DBUS
+
+#if HAVE_GLIB_DBUS
+static
 void
 deactivate_dbus_based_screensaver(const char *d_service, const char *d_path,
                                   const char *d_interface)
@@ -136,6 +230,11 @@ deactivate_dbus_based_screensaver(const char *d_service, const char *d_path,
 
     if (!connection)
         return;
+
+    if (is_dbus_based_screensaver_active(d_service, d_path, d_interface)) {
+        // screen saver is active already, deactivating timer makes no sense
+        return;
+    }
 
     GDBusMessage *msg = g_dbus_message_new_method_call(d_service, d_path, d_interface,
                                                        "SimulateUserActivity");
@@ -149,6 +248,21 @@ deactivate_dbus_based_screensaver(const char *d_service, const char *d_path,
         trace_error("%s, can't send message, %s\n", __func__, error->message);
         g_clear_error(&error);
         goto err;
+    }
+
+    // workaround Plasma 5 issue by calling GetSessionIdleTime after SimulateUserActivity
+    if (config.quirks.plasma5_screensaver) {
+        msg = g_dbus_message_new_method_call(d_service, d_path, d_interface, "GetSessionIdleTime");
+
+        error = NULL;
+        g_dbus_connection_send_message(connection, msg, G_DBUS_SEND_MESSAGE_FLAGS_NONE, NULL,
+                                       &error);
+
+        if (error != NULL) {
+            trace_error("%s, can't send message, %s\n", __func__, error->message);
+            g_clear_error(&error);
+            goto err;
+        }
     }
 
     g_dbus_connection_flush_sync(connection, NULL, &error);
@@ -169,6 +283,9 @@ screensaver_deactivate(Display *dpy, uint32_t types)
     if (types & SST_XSCREENSAVER)
         deactivate_xscreensaver(dpy);
 
+    // reset internal X screen saver timer
+    XResetScreenSaver(dpy);
+
 #if HAVE_GLIB_DBUS
     if (types & SST_FDO_SCREENSAVER)
         deactivate_dbus_based_screensaver(FDOS_SERVICE, FDOS_PATH, FDOS_INTERFACE);
@@ -178,6 +295,9 @@ screensaver_deactivate(Display *dpy, uint32_t types)
 
     if (types & SST_KDE_SCREENSAVER)
         deactivate_dbus_based_screensaver(KS_SERVICE, KS_PATH, KS_INTERFACE);
+
+    if (types & SST_CINNAMON_SCREENSAVER)
+        deactivate_dbus_based_screensaver(CINNAMON_SERVICE, CINNAMON_PATH, CINNAMON_INTERFACE);
 #endif // HAVE_GLIB_DBUS
 }
 
@@ -235,6 +355,9 @@ detect_dbus_based_screensavers(void)
 
         if (strcmp(str, FDOS_SERVICE) == 0)
             flags |= SST_FDO_SCREENSAVER;
+
+        if (strcmp(str, CINNAMON_SERVICE) == 0)
+            flags |= SST_CINNAMON_SCREENSAVER;
     }
     g_variant_iter_free(iter);
     ret = flags;

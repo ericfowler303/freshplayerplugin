@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -33,6 +33,9 @@
 #include <npapi/npfunctions.h>
 
 
+#define NPString_literal(str) { .UTF8Characters = str, .UTF8Length = strlen(str) }
+
+
 typedef GLXContext
 (*glx_create_context_attribs_arb_f)(Display *dpy, GLXFBConfig config,
                                     GLXContext share_context, Bool direct,
@@ -42,6 +45,8 @@ struct display_s {
     Display                            *x;
     Cursor                              transparent_cursor;
     pthread_mutex_t                     lock;
+    XRenderPictFormat                  *pictfmt_rgb24;
+    XRenderPictFormat                  *pictfmt_argb32;
     uint32_t                            min_width;  ///< smallest screen width
     uint32_t                            min_height; ///< smallest screen height
     uint32_t                            screensaver_types;
@@ -63,9 +68,6 @@ struct pp_instance_s   *tables_get_some_pp_instance(void);
 
 PangoContext   *tables_get_pango_ctx(void);
 PangoFontMap   *tables_get_pango_font_map(void);
-
-PangoFontDescription *
-pp_font_desc_to_pango_font_desc(const struct PP_BrowserFont_Trusted_Description *description);
 
 void    tables_add_npobj_npp_mapping(NPObject *npobj, NPP npp);
 NPP     tables_get_npobj_npp_mapping(NPObject *npobj);

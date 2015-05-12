@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -23,6 +23,8 @@
  */
 
 #include "ppb_var.h"
+#include "ppb_message_loop.h"
+#include "ppb_core.h"
 #include <pthread.h>
 #include <inttypes.h>
 #include <stdlib.h>
@@ -31,8 +33,10 @@
 #include "tables.h"
 #include <ppapi/c/dev/ppb_var_deprecated.h>
 #include <ppapi/c/dev/ppp_class_deprecated.h>
+#include <ppapi/c/pp_errors.h>
 #include "n2p_proxy_class.h"
 #include "p2n_proxy_class.h"
+#include "compat.h"
 #include "config.h"
 
 
@@ -52,6 +56,8 @@ struct var_s {
         void                               *data;
     } obj;
     void           *map_addr;
+    GHashTable     *dict;       // string -> struct PP_Var
+    GArray         *array;      // of struct PP_Var
 };
 
 
@@ -104,6 +110,109 @@ get_var_s(struct PP_Var var)
     return v;
 }
 
+struct create_np_object_param_s {
+    NPClass        *npclass;
+    NPObject       *res;
+    PP_Resource     m_loop;
+    int32_t         depth;
+};
+
+static
+void
+create_np_object_ptac(void *param)
+{
+    struct create_np_object_param_s *p = param;
+    struct pp_instance_s *pp_i = tables_get_some_pp_instance();
+
+    if (pp_i && pp_i->npp) {
+        p->res = npn.createobject(pp_i->npp, p->npclass);
+    } else {
+        p->res = NULL;
+        trace_error("%s, no alive plugin instance\n", __func__);
+    }
+
+    ppb_message_loop_post_quit_depth(p->m_loop, PP_FALSE, p->depth);
+}
+
+
+static
+void
+create_np_object_comt(void *user_data, int32_t result)
+{
+    ppb_core_call_on_browser_thread(0, create_np_object_ptac, user_data);
+}
+
+static
+NPObject *
+create_np_object(NPClass *npclass)
+{
+    if (ppb_message_loop_get_current() == ppb_message_loop_get_for_browser_thread()) {
+        // already on browser thread, no need to jump there
+        struct pp_instance_s *pp_i = tables_get_some_pp_instance();
+        return (pp_i && pp_i->npp) ? npn.createobject(pp_i->npp, npclass) : NULL;
+    }
+
+    struct create_np_object_param_s *p = g_slice_alloc(sizeof(*p));
+
+    p->npclass = npclass;
+    p->res =     NULL;
+    p->m_loop =  ppb_message_loop_get_current();
+    p->depth =   ppb_message_loop_get_depth(p->m_loop) + 1;
+
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(create_np_object_comt, p), 0,
+                                           PP_OK, p->depth, __func__);
+    ppb_message_loop_run_nested(p->m_loop);
+
+    NPObject *res = p->res;
+    g_slice_free1(sizeof(*p), p);
+    return res;
+}
+
+struct retain_np_object_param_s {
+    NPObject           *np_object;
+    PP_Resource         m_loop;
+    int                 depth;
+};
+
+static
+void
+retain_np_object_ptac(void *param)
+{
+    struct retain_np_object_param_s *p = param;
+    npn.retainobject(p->np_object);
+    ppb_message_loop_post_quit_depth(p->m_loop, PP_FALSE, p->depth);
+}
+
+static
+void
+retain_np_object_comt(void *user_data, int32_t result)
+{
+    ppb_core_call_on_browser_thread(0, retain_np_object_ptac, user_data);
+}
+
+static
+void
+retain_np_object(NPObject *np_object)
+{
+    if (ppb_message_loop_get_current() == ppb_message_loop_get_for_browser_thread()) {
+        // already on browser thread, no need to jump there
+        npn.retainobject(np_object);
+        return;
+    }
+
+    struct retain_np_object_param_s *p = g_slice_alloc(sizeof(*p));
+
+    p->np_object = np_object;
+    p->m_loop =    ppb_message_loop_get_current();
+    p->depth =     ppb_message_loop_get_depth(p->m_loop) + 1;
+
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(retain_np_object_comt, p), 0,
+                                           PP_OK, p->depth, __func__);
+    ppb_message_loop_run_nested(p->m_loop);
+
+    g_slice_free1(sizeof(*p), p);
+}
+
 NPVariant
 pp_var_to_np_variant(struct PP_Var var)
 {
@@ -140,15 +249,19 @@ pp_var_to_np_variant(struct PP_Var var)
         if (v->obj._class == &n2p_proxy_class) {
             res.type = NPVariantType_Object;
             res.value.objectValue = v->obj.data;
-            npn.retainobject(res.value.objectValue); // TODO: call on main thread?
+            retain_np_object(res.value.objectValue);
         } else {
-            struct np_proxy_object_s *np_proxy_object = malloc(sizeof(struct np_proxy_object_s));
-            res.type = NPVariantType_Object;
-            np_proxy_object->npobj.referenceCount = 1;
-            np_proxy_object->npobj._class = &p2n_proxy_class;
-            np_proxy_object->ppobj = var;
-            res.value.objectValue = (NPObject *)np_proxy_object;
-            ppb_var_add_ref(var);
+            res.value.objectValue = create_np_object(&p2n_proxy_class);
+            if (res.value.objectValue) {
+                struct np_proxy_object_s *np_proxy_object;
+
+                res.type = NPVariantType_Object;
+                np_proxy_object = (struct np_proxy_object_s *)res.value.objectValue;
+                np_proxy_object->ppobj = var;
+                ppb_var_add_ref(var);
+            } else {
+                VOID_TO_NPVARIANT(res);
+            }
         }
         break;
 
@@ -247,6 +360,12 @@ ppb_var_release(struct PP_Var var)
             free(v->map_addr);
         v->map_addr = NULL;
         break;
+    case PP_VARTYPE_DICTIONARY:
+        g_hash_table_unref(v->dict);
+        break;
+    case PP_VARTYPE_ARRAY:
+        g_array_free(v->array, TRUE);
+        break;
     default:
         // do nothing
         break;
@@ -316,7 +435,12 @@ ppb_var_var_from_utf8(const char *data, uint32_t len)
     var.type = PP_VARTYPE_STRING;
     v->str.len = len;
     v->str.data = malloc(len + 1);
-    memcpy(v->str.data, data, len);
+
+    if (data)
+        memcpy(v->str.data, data, len);
+    else
+        memset(v->str.data, 0, len);
+
     v->str.data[len] = 0;       // ensure all strings are zero terminated
     v->ref_count = 1;
 
@@ -673,6 +797,143 @@ ppb_var_array_buffer_unmap(struct PP_Var var)
     v->map_addr = NULL;
 }
 
+static
+void
+var_dict_key_destroy_func(gpointer data)
+{
+    // it's just a memory block
+    free(data);
+}
+
+static
+void
+var_dict_val_destroy_func(gpointer data)
+{
+    struct PP_Var *var = data;
+    ppb_var_release(*var);
+    g_slice_free(struct PP_Var, var);
+}
+
+struct PP_Var
+ppb_var_dictionary_create(void)
+{
+    struct var_s *v = g_slice_alloc0(sizeof(*v));
+    struct PP_Var var = {};
+
+    var.type = PP_VARTYPE_DICTIONARY;
+    v->ref_count = 1;
+    v->dict = g_hash_table_new_full(g_str_hash, g_str_equal, var_dict_key_destroy_func,
+                                    var_dict_val_destroy_func);
+
+    pthread_mutex_lock(&lock);
+    var.value.as_id = get_new_var_id();
+    v->var = var;
+    g_hash_table_insert(var_ht, GSIZE_TO_POINTER(var.value.as_id), v);
+    pthread_mutex_unlock(&lock);
+
+    return var;
+}
+
+struct PP_Var
+ppb_var_dictionary_get(struct PP_Var dict, struct PP_Var key)
+{
+    return PP_MakeUndefined();
+}
+
+PP_Bool
+ppb_var_dictionary_set(struct PP_Var dict, struct PP_Var key, struct PP_Var value)
+{
+    if (dict.type != PP_VARTYPE_DICTIONARY || key.type != PP_VARTYPE_STRING)
+        return PP_FALSE;
+
+    struct var_s *d = get_var_s(dict);
+    char *key_copy = nullsafe_strdup(ppb_var_var_to_utf8(key, NULL));
+    struct PP_Var *value_copy = g_slice_alloc(sizeof(*value_copy));
+    memcpy(value_copy, &value, sizeof(struct PP_Var));
+
+    g_hash_table_replace(d->dict, key_copy, value_copy);
+    return PP_TRUE;
+}
+
+void
+ppb_var_dictionary_delete(struct PP_Var dict, struct PP_Var key)
+{
+}
+
+PP_Bool
+ppb_var_dictionary_has_key(struct PP_Var dict, struct PP_Var key)
+{
+    return PP_FALSE;
+}
+
+struct PP_Var
+ppb_var_dictionary_get_keys(struct PP_Var dict)
+{
+    return PP_MakeUndefined();
+}
+
+static
+void
+var_array_value_clear_func(gpointer data)
+{
+    struct PP_Var *var = data;
+    ppb_var_release(*var);
+}
+
+struct PP_Var
+ppb_var_array_create(void)
+{
+    struct var_s *v = g_slice_alloc0(sizeof(*v));
+    struct PP_Var var = {};
+
+    var.type = PP_VARTYPE_ARRAY;
+    v->ref_count = 1;
+    v->array = g_array_new(FALSE, TRUE, sizeof(struct PP_Var));
+    g_array_set_clear_func(v->array, var_array_value_clear_func);
+
+    pthread_mutex_lock(&lock);
+    var.value.as_id = get_new_var_id();
+    v->var = var;
+    g_hash_table_insert(var_ht, GSIZE_TO_POINTER(var.value.as_id), v);
+    pthread_mutex_unlock(&lock);
+
+    return var;
+}
+
+struct PP_Var
+ppb_var_array_get(struct PP_Var array, uint32_t index)
+{
+    return PP_MakeUndefined();
+}
+
+PP_Bool
+ppb_var_array_set(struct PP_Var array, uint32_t index, struct PP_Var value)
+{
+    if (array.type != PP_VARTYPE_ARRAY)
+        return PP_FALSE;
+
+    struct var_s *v = get_var_s(array);
+    if (index >= v->array->len)
+        g_array_set_size(v->array, index + 1);
+
+    memcpy(&g_array_index(v->array, struct PP_Var, index), &value, sizeof(struct PP_Var));
+    ppb_var_add_ref(value);
+
+    return PP_TRUE;
+}
+
+uint32_t
+ppb_var_array_get_length(struct PP_Var array)
+{
+    return 0;
+}
+
+PP_Bool
+ppb_var_array_set_length(struct PP_Var array, uint32_t length)
+{
+    return PP_FALSE;
+}
+
 
 // trace wrappers
 TRACE_WRAPPER
@@ -908,6 +1169,125 @@ trace_ppb_var_array_buffer_unmap(struct PP_Var var)
     return ppb_var_array_buffer_unmap(var);
 }
 
+TRACE_WRAPPER
+struct PP_Var
+trace_ppb_var_dictionary_create(void)
+{
+    trace_info("[PPB] {full} %s\n", __func__+6);
+    return ppb_var_dictionary_create();
+}
+
+TRACE_WRAPPER
+struct PP_Var
+trace_ppb_var_dictionary_get(struct PP_Var dict, struct PP_Var key)
+{
+    gchar *s_dict = trace_var_as_string(dict);
+    gchar *s_key = trace_var_as_string(key);
+    trace_info("[PPB] {zilch} %s dict=%s, key=%s\n", __func__+6, s_dict, s_key);
+    g_free(s_dict);
+    g_free(s_key);
+    return ppb_var_dictionary_get(dict, key);
+}
+
+TRACE_WRAPPER
+PP_Bool
+trace_ppb_var_dictionary_set(struct PP_Var dict, struct PP_Var key, struct PP_Var value)
+{
+    gchar *s_dict = trace_var_as_string(dict);
+    gchar *s_key = trace_var_as_string(key);
+    gchar *s_value = trace_var_as_string(value);
+    trace_info("[PPB] {full} %s dict=%s, key=%s, value=%s\n", __func__+6, s_dict, s_key, s_value);
+    g_free(s_dict);
+    g_free(s_key);
+    g_free(s_value);
+    return ppb_var_dictionary_set(dict, key, value);
+}
+
+TRACE_WRAPPER
+void
+trace_ppb_var_dictionary_delete(struct PP_Var dict, struct PP_Var key)
+{
+    gchar *s_dict = trace_var_as_string(dict);
+    gchar *s_key = trace_var_as_string(key);
+    trace_info("[PPB] {zilch} %s dict=%s, key=%s\n", __func__+6, s_dict, s_key);
+    g_free(s_dict);
+    g_free(s_key);
+    return ppb_var_dictionary_delete(dict, key);
+}
+
+TRACE_WRAPPER
+PP_Bool
+trace_ppb_var_dictionary_has_key(struct PP_Var dict, struct PP_Var key)
+{
+    gchar *s_dict = trace_var_as_string(dict);
+    gchar *s_key = trace_var_as_string(key);
+    trace_info("[PPB] {zilch} %s dict=%s, key=%s\n", __func__+6, s_dict, s_key);
+    g_free(s_dict);
+    g_free(s_key);
+    return ppb_var_dictionary_has_key(dict, key);
+}
+
+TRACE_WRAPPER
+struct PP_Var
+trace_ppb_var_dictionary_get_keys(struct PP_Var dict)
+{
+    gchar *s_dict = trace_var_as_string(dict);
+    trace_info("[PPB] {zilch} %s dict=%s\n", __func__+6, s_dict);
+    g_free(s_dict);
+    return ppb_var_dictionary_get_keys(dict);
+}
+
+TRACE_WRAPPER
+struct PP_Var
+trace_ppb_var_array_create(void)
+{
+    trace_info("[PPB] {full} %s\n", __func__+6);
+    return ppb_var_array_create();
+}
+
+TRACE_WRAPPER
+struct PP_Var
+trace_ppb_var_array_get(struct PP_Var array, uint32_t index)
+{
+    gchar *s_array = trace_var_as_string(array);
+    trace_info("[PPB] {zilch} %s array=%s, index=%u\n", __func__+6, s_array, index);
+    g_free(s_array);
+    return ppb_var_array_get(array, index);
+}
+
+TRACE_WRAPPER
+PP_Bool
+trace_ppb_var_array_set(struct PP_Var array, uint32_t index, struct PP_Var value)
+{
+    gchar *s_array = trace_var_as_string(array);
+    gchar *s_value = trace_var_as_string(value);
+    trace_info("[PPB] {full} %s array=%s, index=%u, value=%s\n", __func__+6, s_array, index,
+               s_value);
+    g_free(s_array);
+    g_free(s_value);
+    return ppb_var_array_set(array, index, value);
+}
+
+TRACE_WRAPPER
+uint32_t
+trace_ppb_var_array_get_length(struct PP_Var array)
+{
+    gchar *s_array = trace_var_as_string(array);
+    trace_info("[PPB] {zilch} %s array=%s\n", __func__+6, s_array);
+    g_free(s_array);
+    return ppb_var_array_get_length(array);
+}
+
+TRACE_WRAPPER
+PP_Bool
+trace_ppb_var_array_set_length(struct PP_Var array, uint32_t length)
+{
+    gchar *s_array = trace_var_as_string(array);
+    trace_info("[PPB] {zilch} %s array=%s, length=%u\n", __func__+6, s_array, length);
+    g_free(s_array);
+    return ppb_var_array_set_length(array, length);
+}
+
 
 const struct PPB_Var_1_2 ppb_var_interface_1_2 = {
     .AddRef          = TWRAPF(ppb_var_add_ref),
@@ -955,4 +1335,21 @@ const struct PPB_VarArrayBuffer_1_0 ppb_var_array_buffer_interface_1_0 = {
     .ByteLength =   TWRAPF(ppb_var_array_buffer_byte_length),
     .Map =          TWRAPF(ppb_var_array_buffer_map),
     .Unmap =        TWRAPF(ppb_var_array_buffer_unmap),
+};
+
+const struct PPB_VarDictionary_1_0 ppb_var_dictionary_interface_1_0 = {
+    .Create =   TWRAPF(ppb_var_dictionary_create),
+    .Get =      TWRAPZ(ppb_var_dictionary_get),
+    .Set =      TWRAPF(ppb_var_dictionary_set),
+    .Delete =   TWRAPZ(ppb_var_dictionary_delete),
+    .HasKey =   TWRAPZ(ppb_var_dictionary_has_key),
+    .GetKeys =  TWRAPZ(ppb_var_dictionary_get_keys),
+};
+
+const struct PPB_VarArray_1_0 ppb_var_array_interface_1_0 = {
+    .Create =    TWRAPF(ppb_var_array_create),
+    .Get =       TWRAPZ(ppb_var_array_get),
+    .Set =       TWRAPF(ppb_var_array_set),
+    .GetLength = TWRAPZ(ppb_var_array_get_length),
+    .SetLength = TWRAPZ(ppb_var_array_set_length),
 };

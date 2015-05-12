@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -31,10 +31,11 @@
 
 
 enum screensaver_types {
-    SST_XSCREENSAVER =      (1 << 0),
-    SST_FDO_SCREENSAVER =   (1 << 1),   // freedesktop.org screensaver interface spec
-    SST_GNOME_SCREENSAVER = (1 << 2),
-    SST_KDE_SCREENSAVER =   (1 << 3),
+    SST_XSCREENSAVER =          (1 << 0),
+    SST_FDO_SCREENSAVER =       (1 << 1),   // freedesktop.org screensaver interface spec
+    SST_GNOME_SCREENSAVER =     (1 << 2),
+    SST_KDE_SCREENSAVER =       (1 << 3),
+    SST_CINNAMON_SCREENSAVER =  (1 << 4),
 };
 
 

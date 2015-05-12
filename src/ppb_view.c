@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -25,6 +25,7 @@
 #include "ppb_view.h"
 #include <stdlib.h>
 #include "trace.h"
+#include "config.h"
 #include "pp_resource.h"
 
 
@@ -90,13 +91,21 @@ ppb_view_get_clip_rect(PP_Resource resource, struct PP_Rect *clip)
 float
 ppb_view_get_device_scale(PP_Resource resource)
 {
-    return 1.0;
+    return config.device_scale;
 }
 
 float
 ppb_view_get_css_scale(PP_Resource resource)
 {
-    return 1.0;
+    return config.device_scale;
+}
+
+PP_Bool
+ppb_view_get_scroll_offset(PP_Resource resource, struct PP_Point *offset)
+{
+    offset->x = 0;
+    offset->y = 0;
+    return PP_TRUE;
 }
 
 
@@ -113,7 +122,7 @@ TRACE_WRAPPER
 PP_Bool
 trace_ppb_view_get_rect(PP_Resource resource, struct PP_Rect *rect)
 {
-    trace_info("[PPB] {full} %s resource=%d, rect=%p\n", __func__+6, resource, rect);
+    trace_info("[PPB] {full} %s resource=%d\n", __func__+6, resource);
     return ppb_view_get_rect(resource, rect);
 }
 
@@ -145,7 +154,7 @@ TRACE_WRAPPER
 PP_Bool
 trace_ppb_view_get_clip_rect(PP_Resource resource, struct PP_Rect *clip)
 {
-    trace_info("[PPB] {full} %s resource=%d, clip=%p\n", __func__+6, resource, clip);
+    trace_info("[PPB] {full} %s resource=%d\n", __func__+6, resource);
     return ppb_view_get_clip_rect(resource, clip);
 }
 
@@ -163,6 +172,14 @@ trace_ppb_view_get_css_scale(PP_Resource resource)
 {
     trace_info("[PPB] {full} %s resource=%d\n", __func__+6, resource);
     return ppb_view_get_css_scale(resource);
+}
+
+TRACE_WRAPPER
+PP_Bool
+trace_ppb_view_get_scroll_offset(PP_Resource resource, struct PP_Point *offset)
+{
+    trace_info("[PPB] {zilch} %s resource=%d\n", __func__+6, resource);
+    return ppb_view_get_scroll_offset(resource, offset);
 }
 
 
@@ -189,4 +206,16 @@ const struct PPB_View_1_1 ppb_view_interface_1_1 = {
     .GetClipRect =      TWRAPF(ppb_view_get_clip_rect),
     .GetDeviceScale =   TWRAPF(ppb_view_get_device_scale),
     .GetCSSScale =      TWRAPF(ppb_view_get_css_scale),
+};
+
+const struct PPB_View_1_2 ppb_view_interface_1_2 = {
+    .IsView =           TWRAPF(ppb_view_is_view),
+    .GetRect =          TWRAPF(ppb_view_get_rect),
+    .IsFullscreen =     TWRAPZ(ppb_view_is_fullscreen),
+    .IsVisible =        TWRAPZ(ppb_view_is_visible),
+    .IsPageVisible =    TWRAPZ(ppb_view_is_page_visible),
+    .GetClipRect =      TWRAPF(ppb_view_get_clip_rect),
+    .GetDeviceScale =   TWRAPF(ppb_view_get_device_scale),
+    .GetCSSScale =      TWRAPF(ppb_view_get_css_scale),
+    .GetScrollOffset =  TWRAPZ(ppb_view_get_scroll_offset),
 };

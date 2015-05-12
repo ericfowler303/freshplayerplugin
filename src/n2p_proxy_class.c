@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -35,6 +35,7 @@
 #include "ppb_core.h"
 #include "ppb_var.h"
 #include "ppb_message_loop.h"
+#include <ppapi/c/pp_errors.h>
 
 
 struct has_property_param_s {
@@ -67,7 +68,7 @@ void
 n2p_has_property_comt(void *user_data, int32_t result)
 {
     struct has_property_param_s *p = user_data;
-    ppb_core_call_on_browser_thread(n2p_has_property_ptac, p);
+    ppb_core_call_on_browser_thread(0, n2p_has_property_ptac, p);
 }
 
 static
@@ -87,7 +88,8 @@ n2p_has_property(void *object, struct PP_Var name, struct PP_Var *exception)
     p->m_loop =     ppb_message_loop_get_current();
     p->depth =      ppb_message_loop_get_depth(p->m_loop) + 1;
 
-    ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(n2p_has_property_comt, p), 0);
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(n2p_has_property_comt, p), 0,
+                                           PP_OK, p->depth, __func__);
     ppb_message_loop_run_nested(p->m_loop);
 
     bool result = p->result;
@@ -142,7 +144,7 @@ void
 n2p_get_property_comt(void *user_data, int32_t result)
 {
     struct get_property_param_s *p = user_data;
-    ppb_core_call_on_browser_thread(n2p_get_property_ptac, p);
+    ppb_core_call_on_browser_thread(0, n2p_get_property_ptac, p);
 }
 
 static
@@ -162,7 +164,8 @@ n2p_get_property(void *object, struct PP_Var name, struct PP_Var *exception)
     p->m_loop =     ppb_message_loop_get_current();
     p->depth =      ppb_message_loop_get_depth(p->m_loop) + 1;
 
-    ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(n2p_get_property_comt, p), 0);
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(n2p_get_property_comt, p), 0,
+                                           PP_OK, p->depth, __func__);
     ppb_message_loop_run_nested(p->m_loop);
 
     struct PP_Var result = p->result;
@@ -243,7 +246,7 @@ void
 n2p_call_comt(void *user_data, int32_t result)
 {
     struct call_param_s *p = user_data;
-    ppb_core_call_on_browser_thread(n2p_call_ptac, p);
+    ppb_core_call_on_browser_thread(0, n2p_call_ptac, p);
 }
 
 static
@@ -266,7 +269,8 @@ n2p_call(void *object, struct PP_Var method_name, uint32_t argc, struct PP_Var *
     p->m_loop =         ppb_message_loop_get_current();
     p->depth =          ppb_message_loop_get_depth(p->m_loop) + 1;
 
-    ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(n2p_call_comt, p), 0);
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(n2p_call_comt, p), 0, PP_OK,
+                                           p->depth, __func__);
     ppb_message_loop_run_nested(p->m_loop);
 
     struct PP_Var result = p->result;
@@ -324,7 +328,7 @@ void
 n2p_construct_comt(void *user_data, int32_t result)
 {
     struct construct_param_s *p = user_data;
-    ppb_core_call_on_browser_thread(n2p_construct_ptac, p);
+    ppb_core_call_on_browser_thread(0, n2p_construct_ptac, p);
 }
 
 static
@@ -339,7 +343,8 @@ n2p_construct(void *object, uint32_t argc, struct PP_Var *argv, struct PP_Var *e
     p->m_loop =     ppb_message_loop_get_current();
     p->depth =      ppb_message_loop_get_depth(p->m_loop) + 1;
 
-    ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(n2p_construct_comt, p), 0);
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(n2p_construct_comt, p), 0, PP_OK,
+                                           p->depth, __func__);
     ppb_message_loop_run_nested(p->m_loop);
 
     struct PP_Var result = p->result;
@@ -348,15 +353,51 @@ n2p_construct(void *object, uint32_t argc, struct PP_Var *argv, struct PP_Var *e
     return result;
 }
 
+struct deallocate_param_s {
+    void               *object;
+    PP_Resource         m_loop;
+    int                 depth;
+};
+
+static
+void
+n2p_deallocate_ptac(void *param)
+{
+    struct deallocate_param_s *p = param;
+
+    NPObject *np_object = p->object;
+    uint32_t ref_cnt = np_object->referenceCount;
+
+    npn.releaseobject(p->object);
+
+    if (ref_cnt <= 1)
+        tables_remove_npobj_npp_mapping(p->object);
+
+    ppb_message_loop_post_quit_depth(p->m_loop, PP_FALSE, p->depth);
+}
+
+static
+void
+n2p_deallocate_comt(void *user_data, int32_t result)
+{
+    struct deallocate_param_s *p = user_data;
+    ppb_core_call_on_browser_thread(0, n2p_deallocate_ptac, p);
+}
+
 static
 void
 n2p_deallocate(void *object)
 {
-    NPObject *np_object = object;
-    uint32_t ref_cnt = np_object->referenceCount;
-    npn.releaseobject(object);
-    if (ref_cnt <= 1)
-        tables_remove_npobj_npp_mapping(object);
+    struct deallocate_param_s *p = g_slice_alloc(sizeof(*p));
+    p->object = object;
+    p->m_loop = ppb_message_loop_get_current();
+    p->depth =  ppb_message_loop_get_depth(p->m_loop) + 1;
+
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(n2p_deallocate_comt, p), 0, PP_OK,
+                                           p->depth, __func__);
+    ppb_message_loop_run_nested(p->m_loop);
+
+    g_slice_free1(sizeof(*p), p);
 }
 
 

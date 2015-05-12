@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -152,44 +152,6 @@ tables_get_pango_font_map(void)
     return pango_fm;
 }
 
-PangoFontDescription *
-pp_font_desc_to_pango_font_desc(const struct PP_BrowserFont_Trusted_Description *description)
-{
-    PangoFontDescription *font_desc;
-
-    if (description->face.type == PP_VARTYPE_STRING) {
-        const char *s = ppb_var_var_to_utf8(description->face, NULL);
-        font_desc = pango_font_description_from_string(s);
-    } else {
-        font_desc = pango_font_description_new();
-        switch (description->family) {
-        case PP_BROWSERFONT_TRUSTED_FAMILY_SERIF:
-            pango_font_description_set_family(font_desc, "serif");
-            break;
-        case PP_BROWSERFONT_TRUSTED_FAMILY_SANSSERIF:
-            pango_font_description_set_family(font_desc, "sans-serif");
-            break;
-        case PP_BROWSERFONT_TRUSTED_FAMILY_MONOSPACE:
-            pango_font_description_set_family(font_desc, "monospace");
-            break;
-        case PP_BROWSERFONT_TRUSTED_FAMILY_DEFAULT:
-            // fall through
-        default:
-            // do nothing
-            break;
-        }
-    }
-
-    pango_font_description_set_absolute_size(font_desc, description->size * PANGO_SCALE);
-    pango_font_description_set_weight(font_desc, (description->weight + 1) * 100);
-    if (description->italic)
-        pango_font_description_set_style(font_desc, PANGO_STYLE_ITALIC);
-    if (description->small_caps)
-        pango_font_description_set_variant(font_desc, PANGO_VARIANT_SMALL_CAPS);
-
-    return font_desc;
-}
-
 void
 tables_add_npobj_npp_mapping(NPObject *npobj, NPP npp)
 {
@@ -262,9 +224,10 @@ tables_open_display(void)
     screensaver_connect();
     display.screensaver_types = screensaver_type_detect(display.x);
 
-    gchar *s = g_strdup_printf("screensavers found:%s%s%s%s",
+    gchar *s = g_strdup_printf("screensavers found:%s%s%s%s%s",
         (display.screensaver_types & SST_XSCREENSAVER) ? " XScreenSaver" : "",
         (display.screensaver_types & SST_FDO_SCREENSAVER) ? " fd.o-screensaver" : "",
+        (display.screensaver_types & SST_CINNAMON_SCREENSAVER) ? " cinnamon-screensaver" : "",
         (display.screensaver_types & SST_GNOME_SCREENSAVER) ? " gnome-screensaver" : "",
         (display.screensaver_types & SST_KDE_SCREENSAVER) ? " kscreensaver" : "");
     trace_info_f("%s\n", s);
@@ -308,6 +271,9 @@ tables_open_display(void)
         display.min_width = config.fullscreen_width;
     if (config.fullscreen_height > 0)
         display.min_height = config.fullscreen_height;
+
+    display.pictfmt_rgb24 = XRenderFindStandardFormat(display.x, PictStandardRGB24);
+    display.pictfmt_argb32 = XRenderFindStandardFormat(display.x, PictStandardARGB32);
 
 quit:
     pthread_mutex_unlock(&display.lock);

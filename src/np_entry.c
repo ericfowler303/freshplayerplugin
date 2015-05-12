@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -35,11 +35,16 @@
 #include "config.h"
 #include "reverse_constant.h"
 #include "pp_interface.h"
+#include <glib.h>
+#include "compat.h"
+#include "np_entry.h"
 
 
 static void *module_dl_handler;
 static gchar *module_version;
 static gchar *module_descr;
+static GList *tried_files = NULL;
+static gchar *module_file_name = NULL;
 
 static
 void
@@ -49,10 +54,24 @@ use_fallback_version_strings(void)
     module_descr = g_strdup(fpp_config_get_default_plugin_descr());
 }
 
+GList *
+np_entry_get_tried_plugin_files(void)
+{
+    return tried_files;
+}
+
+gchar *
+np_entry_get_module_file_name(void)
+{
+    return module_file_name;
+}
+
 static
 uintptr_t
 do_load_ppp_module(const char *fname)
 {
+    tried_files = g_list_prepend(tried_files, g_strdup(fname));
+
     module_dl_handler = dlopen(fname, RTLD_LAZY);
     if (!module_dl_handler) {
         trace_info_f("%s, can't open %s\n", __func__, fname);
@@ -78,6 +97,9 @@ do_load_ppp_module(const char *fname)
         module_dl_handler = NULL;
         return 1;
     }
+
+    // module was loaded, save its name
+    module_file_name = g_strdup(fname);
 
     if (!fpp_config_plugin_has_manifest()) {
         use_fallback_version_strings();
@@ -122,9 +144,35 @@ load_ppp_module()
 
     fpp_config_initialize();
 
+    if (tried_files) {
+        g_list_free_full(tried_files, g_free);
+        tried_files = NULL;
+    }
+
     if (fpp_config_get_plugin_path()) {
-        // have specific path
-        return do_load_ppp_module(fpp_config_get_plugin_path());
+        const char *ptr = fpp_config_get_plugin_path();
+        const char *last = strchr(ptr, ':');
+        uintptr_t   ret;
+
+        // parse ':'-separated list
+        while (last != NULL) {
+            // try entries one by one
+            char *entry = strndup(ptr, last - ptr);
+            ret = do_load_ppp_module(entry);
+            free(entry);
+            if (ret == 0)
+                return 0;
+
+            ptr = last + 1;
+            last = strchr(ptr, ':');
+        }
+
+        // and the last entry
+        ret = do_load_ppp_module(ptr);
+        if (ret == 0)
+            return 0;
+
+        goto failure;
     }
 
     // try all paths
@@ -138,7 +186,7 @@ load_ppp_module()
         path_list ++;
     }
 
-    // failure
+failure:
     config.quirks.plugin_missing = 1;
     use_fallback_version_strings();
     trace_error("%s, can't find %s\n", __func__, fpp_config_get_plugin_file_name());
@@ -158,6 +206,11 @@ unload_ppp_module(void)
 
     g_free(module_descr); module_descr = NULL;
     g_free(module_version); module_version = NULL;
+    g_free(module_file_name); module_file_name = NULL;
+    if (tried_files) {
+        g_list_free_full(tried_files, g_free);
+        tried_files = NULL;
+    }
 
     // call module shutdown handler if exists
     ppp_shutdown_module = dlsym(module_dl_handler, "PPP_ShutdownModule");
@@ -216,6 +269,17 @@ x_error_handler(Display *dpy, XErrorEvent *ee)
     return 0;
 }
 
+static
+int
+x_io_error_hanlder(Display *dpy)
+{
+    // IO errors can't be ignored, they always terminate program.
+    // Let's crash here to get core file!
+    trace_error("[NP] got Xlib IO error\n");
+    abort();
+    return 0;
+}
+
 __attribute__((visibility("default")))
 NPError
 NP_Initialize(NPNetscapeFuncs *aNPNFuncs, NPPluginFuncs *aNPPFuncs)
@@ -226,6 +290,7 @@ NP_Initialize(NPNetscapeFuncs *aNPNFuncs, NPPluginFuncs *aNPPFuncs)
     // set logging-only error handler.
     // Ignore a previous one, we have no plans to restore it
     (void)XSetErrorHandler(x_error_handler);
+    (void)XSetIOErrorHandler(x_io_error_hanlder);
 
     memset(&npn, 0, sizeof(npn));
     memcpy(&npn, aNPNFuncs, sizeof(npn) < aNPNFuncs->size ? sizeof(npn) : aNPNFuncs->size);

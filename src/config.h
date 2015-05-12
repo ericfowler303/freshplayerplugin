@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -31,18 +31,23 @@
 struct fpp_config_s {
     int     audio_buffer_min_ms;
     int     audio_buffer_max_ms;
+    int     audio_use_jack;
     char   *pepperflash_path;
     char   *flash_command_line;
     int     enable_3d;
-    int     enable_3d_transparent;
     int     quiet;
     int     fullscreen_width;
     int     fullscreen_height;
     int     randomize_dns_case;
+    double  device_scale;
+    int     enable_windowed_mode;
+    int     enable_xembed;
+    int     tie_fullscreen_window_to_browser;
     struct {
-        int   switch_buttons_2_3;
+        int   connect_first_loader_to_unrequested_stream;
         int   dump_resource_histogram;
         int   dump_variables;
+        int   plasma5_screensaver;
         int   plugin_missing;
         int   incompatible_npapi_version;
         int   x_synchronize;
@@ -94,5 +99,8 @@ fpp_config_get_pepper_data_dir(void);
 
 const char *
 fpp_config_get_pepper_salt_file_name(void);
+
+void
+fpp_config_detect_plugin_specific_quirks(void);
 
 #endif // FPP_CONFIG_H

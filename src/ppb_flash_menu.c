@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -24,6 +24,7 @@
 
 #include "ppb_flash_menu.h"
 #include "ppb_core.h"
+#include "ppb_message_loop.h"
 #include <pthread.h>
 #include <stdlib.h>
 #include "trace.h"
@@ -70,7 +71,7 @@ menu_selection_done(GtkMenuShell *object, gboolean user_data)
 {
     int32_t code = popup_menu_canceled ? PP_ERROR_USERCANCEL : PP_OK;
 
-    ppb_core_call_on_main_thread(0, popup_menu_ccb, code);
+    ppb_core_call_on_main_thread2(0, popup_menu_ccb, code, __func__);
 
     popup_menu_sentinel = 0;
     popup_menu_result = NULL;
@@ -124,6 +125,42 @@ convert_menu(const struct PP_Flash_Menu *pp_menu)
     return menu;
 }
 
+struct flash_menu_create_param_s {
+    PP_Resource                 flash_menu;
+    const struct PP_Flash_Menu *menu_data;
+    PP_Resource                 m_loop;
+    int                         depth;
+};
+
+static
+void
+flash_menu_create_ptac(void *param)
+{
+    struct flash_menu_create_param_s *p = param;
+    struct pp_flash_menu_s *fm = pp_resource_acquire(p->flash_menu, PP_RESOURCE_FLASH_MENU);
+    if (!fm) {
+        trace_error("%s, bad resource\n", __func__);
+        goto quit;
+    }
+
+    // recursively construct menu
+    fm->menu = convert_menu(p->menu_data);
+
+    // we need notification on menu close
+    g_signal_connect(fm->menu, "selection-done", G_CALLBACK(menu_selection_done), NULL);
+
+    pp_resource_release(p->flash_menu);
+quit:
+    ppb_message_loop_post_quit_depth(p->m_loop, PP_FALSE, p->depth);
+}
+
+static
+void
+flash_menu_create_comt(void *user_data, int32_t result)
+{
+    ppb_core_call_on_browser_thread(0, flash_menu_create_ptac, user_data);
+}
+
 PP_Resource
 ppb_flash_menu_create(PP_Instance instance_id, const struct PP_Flash_Menu *menu_data)
 {
@@ -132,20 +169,25 @@ ppb_flash_menu_create(PP_Instance instance_id, const struct PP_Flash_Menu *menu_
         trace_error("%s, bad instance\n", __func__);
         return 0;
     }
+
     PP_Resource flash_menu = pp_resource_allocate(PP_RESOURCE_FLASH_MENU, pp_i);
-    struct pp_flash_menu_s *fm = pp_resource_acquire(flash_menu, PP_RESOURCE_FLASH_MENU);
-    if (!fm) {
+    if (pp_resource_get_type(flash_menu) != PP_RESOURCE_FLASH_MENU) {
         trace_error("%s, resource allocation failure\n", __func__);
         return 0;
     }
 
-    // recursively construct menu
-    fm->menu = convert_menu(menu_data);
+    struct flash_menu_create_param_s *p = g_slice_alloc0(sizeof(*p));
 
-    // we need notification on menu close
-    g_signal_connect(fm->menu, "selection-done", G_CALLBACK(menu_selection_done), NULL);
+    p->flash_menu = flash_menu;
+    p->menu_data =  menu_data;
+    p->m_loop =     ppb_message_loop_get_current();
+    p->depth =      ppb_message_loop_get_depth(p->m_loop) + 1;
 
-    pp_resource_release(flash_menu);
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(flash_menu_create_comt, p), 0,
+                                           PP_OK, p->depth, __func__);
+    ppb_message_loop_run_nested(p->m_loop);
+
+    g_slice_free1(sizeof(*p), p);
     return flash_menu;
 }
 
@@ -161,10 +203,11 @@ void
 ppb_flash_menu_destroy(void *p)
 {
     struct pp_flash_menu_s *fm = p;
+
     g_object_ref_sink(fm->menu);
 
     // actual menu destroy can make something X-related, call in on browser thread
-    ppb_core_call_on_browser_thread(destroy_flash_menu_ptac, fm->menu);
+    ppb_core_call_on_browser_thread(fm->instance->id, destroy_flash_menu_ptac, fm->menu);
 }
 
 PP_Bool
@@ -209,7 +252,7 @@ ppb_flash_menu_show(PP_Resource menu_id, const struct PP_Point *location, int32_
     pp_i->ignore_focus_events_cnt = 2;
     pthread_mutex_unlock(&display.lock);
 
-    ppb_core_call_on_browser_thread(menu_popup_ptac, fm->menu);
+    ppb_core_call_on_browser_thread(pp_i->id, menu_popup_ptac, fm->menu);
 
     pp_resource_release(menu_id);
     return PP_OK_COMPLETIONPENDING;

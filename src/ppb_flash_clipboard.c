@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -170,7 +170,7 @@ get_clipboard_target_atom(uint32_t format)
 {
     switch (format) {
     case PP_FLASH_CLIPBOARD_FORMAT_PLAINTEXT:
-        return GDK_TARGET_STRING;
+        return gdk_atom_intern_static_string("UTF8_STRING");
     case PP_FLASH_CLIPBOARD_FORMAT_HTML:
         return gdk_atom_intern("text/html", FALSE);
     case PP_FLASH_CLIPBOARD_FORMAT_RTF:
@@ -221,7 +221,7 @@ static
 void
 clipboard_is_format_available_comt(void *user_data, int32_t result)
 {
-    ppb_core_call_on_browser_thread(clipboard_is_format_available_ptac, user_data);
+    ppb_core_call_on_browser_thread(0, clipboard_is_format_available_ptac, user_data);
 }
 
 PP_Bool
@@ -237,7 +237,9 @@ ppb_flash_clipboard_is_format_available(PP_Instance instance_id,
     p->m_loop =         ppb_message_loop_get_current();
     p->depth =          ppb_message_loop_get_depth(p->m_loop) + 1;
 
-    ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(clipboard_is_format_available_comt, p), 0);
+    ppb_message_loop_post_work_with_result(p->m_loop,
+                                           PP_MakeCCB(clipboard_is_format_available_comt, p), 0,
+                                           PP_OK, p->depth, __func__);
     ppb_message_loop_run_nested(p->m_loop);
 
     PP_Bool result = p->result;
@@ -296,7 +298,7 @@ static
 void
 clipboard_read_data_comt(void *user_data, int32_t result)
 {
-    ppb_core_call_on_browser_thread(clipboard_read_data_ptac, user_data);
+    ppb_core_call_on_browser_thread(0, clipboard_read_data_ptac, user_data);
 }
 
 struct PP_Var
@@ -312,7 +314,8 @@ ppb_flash_clipboard_read_data(PP_Instance instance_id, PP_Flash_Clipboard_Type c
     p->m_loop =         ppb_message_loop_get_current();
     p->depth =          ppb_message_loop_get_depth(p->m_loop) + 1;
 
-    ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(clipboard_read_data_comt, p), 0);
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(clipboard_read_data_comt, p), 0,
+                                           PP_OK, p->depth, __func__);
     ppb_message_loop_run_nested(p->m_loop);
 
     struct PP_Var result = p->result;
@@ -483,7 +486,7 @@ static
 void
 clipboard_write_data_comt(void *user_data, int32_t result)
 {
-    ppb_core_call_on_browser_thread(clipboard_write_data_ptac, user_data);
+    ppb_core_call_on_browser_thread(0, clipboard_write_data_ptac, user_data);
 }
 
 int32_t
@@ -504,7 +507,8 @@ ppb_flash_clipboard_write_data(PP_Instance instance_id, PP_Flash_Clipboard_Type 
     p->m_loop =             ppb_message_loop_get_current();
     p->depth =              ppb_message_loop_get_depth(p->m_loop) + 1;
 
-    ppb_message_loop_post_work(p->m_loop, PP_MakeCCB(clipboard_write_data_comt, p), 0);
+    ppb_message_loop_post_work_with_result(p->m_loop, PP_MakeCCB(clipboard_write_data_comt, p), 0,
+                                           PP_OK, p->depth, __func__);
     ppb_message_loop_run_nested(p->m_loop);
 
     int32_t result = p->result;

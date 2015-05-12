@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include "trace.h"
 #include "tables.h"
+#include "config.h"
 #include "pp_resource.h"
 
 
@@ -59,14 +60,14 @@ ppb_graphics2d_create(PP_Instance instance, const struct PP_Size *size, PP_Bool 
     }
 
     g2d->is_always_opaque = is_always_opaque;
-    g2d->scale = 1.0;
+    g2d->scale = config.device_scale;
     g2d->width =  size->width;
     g2d->height = size->height;
     g2d->stride = 4 * size->width;
 
-    g2d->scaled_width =  g2d->width;
-    g2d->scaled_height = g2d->height;
-    g2d->scaled_stride = g2d->stride;
+    g2d->scaled_width = g2d->width * g2d->scale + 0.5;
+    g2d->scaled_height = g2d->height * g2d->scale + 0.5;
+    g2d->scaled_stride = 4 * g2d->scaled_width;
 
     g2d->data = calloc(g2d->stride * g2d->height, 1);
     g2d->second_buffer = calloc(g2d->scaled_stride * g2d->scaled_height, 1);
@@ -166,15 +167,33 @@ ppb_graphics2d_replace_contents(PP_Resource graphics_2d, PP_Resource image_data)
 
 static
 void
-call_invalidaterect_ptac(void *param)
+call_forceredraw_ptac(void *param)
 {
     struct pp_instance_s *pp_i = tables_get_pp_instance(GPOINTER_TO_SIZE(param));
-    if (!pp_i)
+    if (!pp_i) {
+        trace_error("%s, bad instance\n", __func__);
         return;
-    NPRect npr = {.top = 0, .left = 0, .bottom = pp_i->height, .right = pp_i->width};
+    }
 
-    npn.invalidaterect(pp_i->npp, &npr);
-    npn.forceredraw(pp_i->npp);
+    if (pp_i->is_fullscreen || pp_i->windowed_mode) {
+        XEvent ev = {
+            .xgraphicsexpose = {
+                .type =     GraphicsExpose,
+                .drawable = pp_i->is_fullscreen ? pp_i->fs_wnd : pp_i->wnd,
+                .width =    pp_i->is_fullscreen ? pp_i->fs_width : pp_i->width,
+                .height =   pp_i->is_fullscreen ? pp_i->fs_height : pp_i->height,
+            }
+        };
+
+        pthread_mutex_lock(&display.lock);
+        XSendEvent(display.x, ev.xgraphicsexpose.drawable, True, ExposureMask, &ev);
+        XFlush(display.x);
+        pthread_mutex_unlock(&display.lock);
+    } else {
+        NPRect npr = {.top = 0, .left = 0, .bottom = pp_i->height, .right = pp_i->width};
+        npn.invalidaterect(pp_i->npp, &npr);
+        npn.forceredraw(pp_i->npp);
+    }
 }
 
 int32_t
@@ -190,20 +209,16 @@ ppb_graphics2d_flush(PP_Resource graphics_2d, struct PP_CompletionCallback callb
 
     pthread_mutex_lock(&display.lock);
 
-    if (pp_i->graphics != graphics_2d) {
-        pp_resource_release(graphics_2d);
-        pthread_mutex_unlock(&display.lock);
-        return PP_ERROR_FAILED;
-    }
-
     if (pp_i->graphics_in_progress) {
         pp_resource_release(graphics_2d);
         pthread_mutex_unlock(&display.lock);
         return PP_ERROR_INPROGRESS;
     }
 
-    pp_i->graphics_ccb = callback;
-    pp_i->graphics_in_progress = 1;
+    if (pp_i->graphics == graphics_2d) {
+        pp_i->graphics_ccb = callback;
+        pp_i->graphics_in_progress = 1;
+    }
     pthread_mutex_unlock(&display.lock);
 
     while (g2d->task_list) {
@@ -281,29 +296,16 @@ ppb_graphics2d_flush(PP_Resource graphics_2d, struct PP_CompletionCallback callb
 
     pp_resource_release(graphics_2d);
 
-    pthread_mutex_lock(&display.lock);
-    if (!callback.func)
-        pthread_barrier_init(&pp_i->graphics_barrier, NULL, 2);
-    if (pp_i->is_fullscreen) {
-        XGraphicsExposeEvent ev = {
-            .type = GraphicsExpose,
-            .drawable = pp_i->fs_wnd,
-            .width =    pp_i->fs_width,
-            .height =   pp_i->fs_height,
-        };
+    ppb_core_call_on_browser_thread(pp_i->id, call_forceredraw_ptac, GSIZE_TO_POINTER(pp_i->id));
 
-        XSendEvent(display.x, pp_i->fs_wnd, True, ExposureMask, (void *)&ev);
-        XFlush(display.x);
-        pthread_mutex_unlock(&display.lock);
-    } else {
-        pthread_mutex_unlock(&display.lock);
-        ppb_core_call_on_browser_thread(call_invalidaterect_ptac, GSIZE_TO_POINTER(pp_i->id));
+    if (callback.func) {
+        // invoke callback as soon as possible if graphics device is not bound to an instance
+        if (pp_i->graphics != graphics_2d)
+            ppb_core_call_on_main_thread2(0, callback, PP_OK, __func__);
+        return PP_OK_COMPLETIONPENDING;
     }
 
-    if (callback.func)
-        return PP_OK_COMPLETIONPENDING;
-
-    pthread_barrier_wait(&pp_i->graphics_barrier);
+    trace_error("%s, callback.func==NULL branch not implemented\n", __func__);
     return PP_OK;
 }
 
@@ -316,9 +318,9 @@ ppb_graphics2d_set_scale(PP_Resource resource, float scale)
         return PP_ERROR_BADRESOURCE;
     }
 
-    g2d->scale = scale;
-    g2d->scaled_width = g2d->width * scale + 0.5;
-    g2d->scaled_height = g2d->height * scale + 0.5;
+    g2d->scale = scale * config.device_scale;
+    g2d->scaled_width = g2d->width * g2d->scale + 0.5;
+    g2d->scaled_height = g2d->height * g2d->scale + 0.5;
     g2d->scaled_stride = 4 * g2d->scaled_width;
 
     free(g2d->second_buffer);
@@ -338,7 +340,7 @@ ppb_graphics2d_get_scale(PP_Resource resource)
         return PP_ERROR_BADRESOURCE;
     }
 
-    float scale = g2d->scale;
+    float scale = g2d->scale / config.device_scale;
     pp_resource_release(resource);
     return scale;
 }

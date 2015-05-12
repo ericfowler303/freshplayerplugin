@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -34,16 +34,18 @@
 enum async_network_task_type_e {
     ASYNC_NETWORK_TCP_CONNECT,
     ASYNC_NETWORK_TCP_CONNECT_WITH_NETADDRESS,
-    ASYNC_NETWORK_TCP_DISCONNECT,
     ASYNC_NETWORK_TCP_READ,
     ASYNC_NETWORK_TCP_WRITE,
+    ASYNC_NETWORK_UDP_RECV,
+    ASYNC_NETWORK_UDP_SEND,
+    ASYNC_NETWORK_DISCONNECT,
+    ASYNC_NETWORK_HOST_RESOLVE,
 };
 
 struct async_network_task_s {
     enum async_network_task_type_e  type;
     struct PP_CompletionCallback    callback;
     PP_Resource                     resource;
-    struct pp_instance_s           *instance;
     char                           *host;
     uint16_t                        port;
     struct PP_NetAddress_Private    netaddr;

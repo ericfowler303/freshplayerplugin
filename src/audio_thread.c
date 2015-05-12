@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -23,20 +23,41 @@
  */
 
 #include "audio_thread.h"
+#include <stdlib.h>
 
 extern audio_stream_ops audio_alsa;
 #if HAVE_PULSEAUDIO
 extern audio_stream_ops audio_pulse;
+#endif
+#if HAVE_JACK
+extern audio_stream_ops audio_jack;
 #endif
 
 
 audio_stream_ops *
 audio_select_implementation(void)
 {
+#if HAVE_JACK
+    if (audio_jack.available())
+        return &audio_jack;
+#endif
 #if HAVE_PULSEAUDIO
     if (audio_pulse.available())
         return &audio_pulse;
 #endif
 
     return &audio_alsa;
+}
+
+void
+audio_capture_device_list_free(audio_device_name *list)
+{
+    if (!list)
+        return;
+
+    for (uintptr_t k = 0; list[k].name != NULL; k ++) {
+        free(list[k].name);
+        free(list[k].longname);
+    }
+    free(list);
 }

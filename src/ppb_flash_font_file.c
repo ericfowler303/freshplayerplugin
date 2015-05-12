@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -48,7 +48,7 @@ ppb_flash_font_file_create(PP_Instance instance,
         trace_error("%s, resource allocation error\n", __func__);
         return 0;
     }
-    PangoFontDescription *font_desc = pp_font_desc_to_pango_font_desc(description);
+    PangoFontDescription *font_desc = pp_browser_font_desc_to_pango_font_desc(description);
 
     fff->font = pango_context_load_font(tables_get_pango_ctx(), font_desc);
     pango_font_description_free(font_desc);
@@ -103,6 +103,9 @@ ppb_flash_font_file_get_font_table(PP_Resource font_file, uint32_t table, void *
         ft_error = FT_Load_Sfnt_Table(fff->ft_face, table, 0, output, &len);
         retval = ft_error == 0 ? PP_TRUE : PP_FALSE;
     }
+
+    if (ft_error != 0)
+        trace_info_f("               ft_error=0x%02x\n", ft_error);
 
     pp_resource_release(font_file);
     return retval;

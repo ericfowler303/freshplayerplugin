@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -27,6 +27,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <glib.h>
+#include "../compat.h"
 
 
 typedef struct {
@@ -97,6 +98,8 @@ uri_parser_parse_uri(const char *s, struct PP_URLComponents_Dev *components)
     (void)uri_parser_error;
     (void)uri_parser_first_final;
 
+    (void)end_password;
+    (void)end_username;
 }
 
 static inline int
@@ -231,14 +234,22 @@ gchar *
 uri_parser_merge_uris(const char *base_uri, const char *rel_uri)
 {
     struct PP_URLComponents_Dev base_c, rel_c;
-    str_t scheme = {};
-    str_t authority = {};
-    str_t path = {};
-    str_t query = {};
-    str_t fragment = {};
-    GList *m = NULL;    // list of allocated memory blocks
+    str_t                       scheme, authority, path, query, fragment;
+    GList                      *m = NULL;    // list of allocated memory blocks
+    int                         scheme_is_file = 0;
 
     uri_parser_parse_uri(base_uri, &base_c);
+
+    // if base_uri is local file, remove heading slashed from rel_uri to make it relative.
+    // That will emulate webserver root
+    if (base_c.scheme.len > 0 && strncmp(base_uri + base_c.scheme.begin, "file", 4) == 0
+        && base_c.scheme.len == 4)
+    {
+        scheme_is_file = 1;
+        while (rel_uri && *rel_uri == '/')
+            rel_uri ++;
+    }
+
     uri_parser_parse_uri(rel_uri, &rel_c);
 
     // See RFC 3986, 5.2. Relative Resolution
@@ -291,7 +302,7 @@ uri_parser_merge_uris(const char *base_uri, const char *rel_uri)
         "%.*s", // fragment
         scheme.len, scheme.data,
         scheme.len > 0 ? ":" : "",
-        authority.len > 0 ? "//" : "",
+        (authority.len > 0 || scheme_is_file) ? "//" : "",
         authority.len, authority.data,
         path.len, path.data,
         query.len > 0 ? "?" : "",
@@ -300,10 +311,7 @@ uri_parser_merge_uris(const char *base_uri, const char *rel_uri)
         fragment.len, fragment.data);
 
     // free temporary strings
-    while (m) {
-        g_free(m->data);
-        m = g_list_next(m);
-    }
+    g_list_free_full(m, g_free);
 
     return res;
 }

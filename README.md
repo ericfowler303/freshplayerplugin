@@ -13,10 +13,10 @@ Pepper Plugin API is an interface promoted by Chromium/Chrome team for
 browser plugins. It's NPAPI-inspired yet significantly different API
 which have every conceivable function plugin may want. Two-dimensional
 graphics, OpenGL ES, font rendering, network access, audio, and so
-on. It's huge, there are 107 groups of functions, called interfaces
-which todays Chromium browser offers to plugins. And specs are not
-final yet. Interfaces are changing, newer versions are arising, older
-ones are getting deleted.
+on. It's huge, there are 112 groups of functions, called interfaces
+which todays Chromium browser offers to plugins. Although specs are not
+final yet, and new interface versions are arising, with some older
+ones getting deleted; rate of change have significantly slowed down.
 
 For various reasons Firefox developers are not interested now in
 implementing PPAPI in Firefox.  However that does not mean it cannot
@@ -63,11 +63,13 @@ Project is using cmake (>=2.8.8) build system.
 
 * Install prerequisites.
 ```
-    $ sudo apt-get install cmake pkg-config ragel libasound2-dev            \
-           libglib2.0-dev libconfig-dev libpango1.0-dev libgl1-mesa-dev     \
-           libevent-dev libgtk+2.0-dev libgles2-mesa-dev libxrandr-dev g++
+    $ sudo apt-get install cmake gcc g++ pkg-config ragel libasound2-dev \
+           libssl-dev libglib2.0-dev libconfig-dev libpango1.0-dev       \
+           libgl1-mesa-dev libevent-dev libgtk+2.0-dev libxrandr-dev     \
+           libxrender-dev libxcursor-dev libv4l-dev
 ```
 * (optional) To enable PulseAudio support, install `libpulse-dev`.
+* (optional) To enable JACK support, install `libjack-jackd2-dev` and `libsoxr-dev`
 
 * Create a `build` subdirectory in the root directory, from that folder, call
 ```
@@ -89,4 +91,7 @@ actual Flash version will be taken from that manifest.
 License
 =======
 
-The MIT License. See LICENSE.MIT for full text.
+The MIT License. See `LICENSE` file for full text.
+
+Directory `3rdparty/` contains source code from 3rd parties which can be
+distributed under other license terms. See source code for details.

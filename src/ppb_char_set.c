@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -34,6 +34,17 @@
 #include "ppb_var.h"
 
 
+static
+const char *
+get_supported_charset_alias(const char *charset)
+{
+    if (strcasecmp(charset, "gb2312-80") == 0) {
+        return "gb2312";
+    } else {
+        return charset;
+    }
+}
+
 char *
 ppb_char_set_utf16_to_char_set(PP_Instance instance, const uint16_t *utf16, uint32_t utf16_len,
                                const char *output_char_set,
@@ -47,6 +58,8 @@ ppb_char_set_utf16_to_char_set(PP_Instance instance, const uint16_t *utf16, uint
     size_t outbytesleft = output_buffer_length - 1;
     iconv_t cd;
     char *tmp;
+
+    output_char_set = get_supported_charset_alias(output_char_set);
 
     switch (on_error) {
     default:
@@ -63,6 +76,13 @@ ppb_char_set_utf16_to_char_set(PP_Instance instance, const uint16_t *utf16, uint
         cd = iconv_open(tmp, "UTF16LE");
         g_free(tmp);
         break;
+    }
+
+    if (cd == (iconv_t)-1) {
+        trace_error("%s, wrong charset %s\n", __func__, output_char_set);
+        memcpy(output, utf16, inbytesleft);
+        *output_length = inbytesleft;
+        return output;
     }
 
     size_t ret = iconv(cd, &inbuf, &inbytesleft, &outbuf, &outbytesleft);
@@ -98,6 +118,8 @@ ppb_char_set_char_set_to_utf16(PP_Instance instance, const char *input, uint32_t
     size_t outbytesleft = output_buffer_length - 2;
     iconv_t cd;
 
+    input_char_set = get_supported_charset_alias(input_char_set);
+
     switch (on_error) {
     default:
     case PP_CHARSET_CONVERSIONERROR_FAIL:
@@ -109,6 +131,13 @@ ppb_char_set_char_set_to_utf16(PP_Instance instance, const char *input, uint32_t
     case PP_CHARSET_CONVERSIONERROR_SUBSTITUTE:
         cd = iconv_open("UTF16LE//TRANSLIT", input_char_set);
         break;
+    }
+
+    if (cd == (iconv_t)-1) {
+        trace_error("%s, wrong charset %s\n", __func__, input_char_set);
+        memcpy(output, input, inbytesleft);
+        *output_length = inbytesleft / 2;
+        return output;
     }
 
     size_t ret = iconv(cd, &inbuf, &inbytesleft, &outbuf, &outbytesleft);

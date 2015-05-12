@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -123,7 +123,7 @@ fcd_response_handler(GtkDialog *dialog, gint response_id, gpointer user_data)
     if (!p->dialog_closed)
         gtk_widget_destroy(GTK_WIDGET(dialog));
 
-    ppb_core_call_on_main_thread(0, p->ccb, callback_result);
+    ppb_core_call_on_main_thread2(0, p->ccb, callback_result, __func__);
 
     ppb_core_release_resource(p->chooser_id);
     g_slice_free(struct show_param_s, p);
@@ -214,7 +214,7 @@ ppb_file_chooser_show_without_user_gesture(PP_Resource chooser, PP_Bool save_as,
     p->chooser_id =             chooser;
 
     ppb_core_add_ref_resource(chooser);
-    ppb_core_call_on_browser_thread(show_without_user_guesture_ptac, p);
+    ppb_core_call_on_browser_thread(p->pp_i->id, show_without_user_guesture_ptac, p);
 
     pp_resource_release(chooser);
     return PP_OK_COMPLETIONPENDING;

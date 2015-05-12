@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -155,6 +155,14 @@ ppb_net_address_get_address(const struct PP_NetAddress_Private *addr, void *addr
 uint32_t
 ppb_net_address_get_scope_id(const struct PP_NetAddress_Private *addr)
 {
+    if (addr->size == sizeof(struct sockaddr_in6)) {
+        struct sockaddr_in6 sai6;
+
+        memcpy(&sai6, addr->data, sizeof(sai6));
+        return sai6.sin6_scope_id;
+    }
+
+    // it's IPv4, function should return 0
     return 0;
 }
 
@@ -162,12 +170,26 @@ void
 ppb_net_address_create_from_ipv4_address(const uint8_t ip[4], uint16_t port,
                                          struct PP_NetAddress_Private *addr_out)
 {
+    struct sockaddr_in sai = { .sin_port = htons(port) };
+
+    memcpy(&sai.sin_addr, ip, sizeof(sai.sin_addr));
+    memset(addr_out, 0, sizeof(struct PP_NetAddress_Private));
+
+    addr_out->size = sizeof(sai);
+    memcpy(addr_out->data, &sai, sizeof(sai));
 }
 
 void
 ppb_net_address_create_from_ipv6_address(const uint8_t ip[16], uint32_t scope_id, uint16_t port,
                                          struct PP_NetAddress_Private *addr_out)
 {
+    struct sockaddr_in6 sai6 = { .sin6_port = htons(port), .sin6_scope_id = htonl(scope_id) };
+
+    memcpy(&sai6.sin6_addr, ip, sizeof(sai6.sin6_addr));
+    memset(addr_out, 0, sizeof(struct PP_NetAddress_Private));
+
+    addr_out->size = sizeof(sai6);
+    memcpy(addr_out->data, &sai6, sizeof(sai6));
 }
 
 
@@ -246,7 +268,7 @@ TRACE_WRAPPER
 uint32_t
 trace_ppb_net_address_get_scope_id(const struct PP_NetAddress_Private *addr)
 {
-    trace_info("[PPB] {zilch} %s\n", __func__+6);
+    trace_info("[PPB] {full} %s addr=%p\n", __func__+6, addr);
     return ppb_net_address_get_scope_id(addr);
 }
 
@@ -255,7 +277,8 @@ void
 trace_ppb_net_address_create_from_ipv4_address(const uint8_t ip[4], uint16_t port,
                                                struct PP_NetAddress_Private *addr_out)
 {
-    trace_info("[PPB] {zilch} %s\n", __func__+6);
+    trace_info("[PPB] {full} %s ip=%u.%u.%u.%u, port=%u\n", __func__+6, ip[0], ip[1], ip[2], ip[3],
+               port);
     return ppb_net_address_create_from_ipv4_address(ip, port, addr_out);
 }
 
@@ -265,7 +288,10 @@ trace_ppb_net_address_create_from_ipv6_address(const uint8_t ip[16], uint32_t sc
                                                uint16_t port,
                                                struct PP_NetAddress_Private *addr_out)
 {
-    trace_info("[PPB] {zilch} %s\n", __func__+6);
+    trace_info("[PPB] {full} %s ip=[%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:%02x%02x:"
+               "%02x%02x], scope_id=%u, port=%u\n", __func__+6, ip[0], ip[1], ip[2], ip[3], ip[4],
+               ip[5], ip[6], ip[7], ip[8], ip[9], ip[10], ip[11], ip[12], ip[13], ip[14], ip[15],
+               scope_id, port);
     return ppb_net_address_create_from_ipv6_address(ip, scope_id, port, addr_out);
 }
 
@@ -279,7 +305,7 @@ const struct PPB_NetAddress_Private_1_1 ppb_net_address_private_interface_1_1 = 
     .GetFamily =             TWRAPF(ppb_net_address_get_family),
     .GetPort =               TWRAPF(ppb_net_address_get_port),
     .GetAddress =            TWRAPF(ppb_net_address_get_address),
-    .GetScopeID =            TWRAPZ(ppb_net_address_get_scope_id),
-    .CreateFromIPv4Address = TWRAPZ(ppb_net_address_create_from_ipv4_address),
-    .CreateFromIPv6Address = TWRAPZ(ppb_net_address_create_from_ipv6_address),
+    .GetScopeID =            TWRAPF(ppb_net_address_get_scope_id),
+    .CreateFromIPv4Address = TWRAPF(ppb_net_address_create_from_ipv4_address),
+    .CreateFromIPv6Address = TWRAPF(ppb_net_address_create_from_ipv6_address),
 };

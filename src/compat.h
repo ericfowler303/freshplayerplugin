@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -26,6 +26,9 @@
 #define FPP_COMPAT_H
 
 #include <glib.h>
+#include <gtk/gtk.h>
+#include <gdk/gdk.h>
+#include <X11/Xlib.h>
 
 #ifdef VER
 #error macro name collision
@@ -39,10 +42,27 @@
 #define HAVE_GLIB_DBUS 0
 #endif
 
-#undef VER
-
+#if (VER(GLIB_MAJOR_VERSION, GLIB_MINOR_VERSION) < VER(2, 32))
 gpointer
-g_async_queue_timeout_pop_compat(GAsyncQueue *queue, guint64 timeout);
+g_async_queue_timeout_pop(GAsyncQueue *queue, guint64 timeout);
 
+void
+g_array_set_clear_func(GArray *array, GDestroyNotify clear_func);
+#endif
+
+#if (VER(GLIB_MAJOR_VERSION, GLIB_MINOR_VERSION) < VER(2, 28))
+void
+g_list_free_full(GList *list, GDestroyNotify free_func);
+#endif
+
+#if (GTK_MAJOR_VERSION * 1000 + GTK_MINOR_VERSION < 2 * 1000 + 24)
+GdkWindow *
+gdk_x11_window_lookup_for_display(GdkDisplay *gdpy, Window wnd);
+
+GdkWindow *
+gdk_x11_window_foreign_new_for_display(GdkDisplay *gdpy, Window wnd);
+#endif
+
+#undef VER
 
 #endif // FPP_COMPAT_H

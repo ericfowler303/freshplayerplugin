@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -33,11 +33,12 @@
 #include <ppapi/c/private/ppb_flash.h>
 #include <ppapi/c/ppb_image_data.h>
 #include <ppapi/c/private/ppb_flash_clipboard.h>
-#include <ppapi/c/private/ppb_nacl_private.h>
 #include <ppapi/c/private/ppb_udp_socket_private.h>
 #include <ppapi/c/dev/pp_video_dev.h>
 #include <ppapi/c/dev/ppb_file_chooser_dev.h>
+#include <ppapi/c/dev/ppb_scrollbar_dev.h>
 #include <ppapi/c/private/ppb_x509_certificate_private.h>
+#include <ppapi/c/private/ppb_pdf.h>
 
 
 const char *reverse_npp_variable(NPPVariable var);
@@ -52,12 +53,14 @@ const char *reverse_char_set_conversion_error(enum PP_CharSet_ConversionError e)
 const char *reverse_gl_enum(unsigned int e);
 const char *reverse_clipboard_type(PP_Flash_Clipboard_Type ct);
 const char *reverse_clipboard_format(uint32_t cf);
-const char *reverse_nacl_event_type(PP_NaClEventType et);
-const char *reverse_nacl_error(PP_NaClError err);
-const char *reverse_nacl_ready_state(PP_NaClReadyState rs);
 const char *reverse_video_decoder_profile(PP_VideoDecoder_Profile profile);
 const char *reverse_file_chooser_mode(PP_FileChooserMode_Dev mode);
 const char *reverse_udp_socket_feature(PP_UDPSocketFeature_Private feature);
 const char *reverse_x509_certificate_field(PP_X509Certificate_Private_Field field);
+const char *reverse_resource_image(PP_ResourceImage resource_image);
+const char *reverse_pdf_feature(PP_PDFFeature feature);
+const char *reverse_resource_string(PP_ResourceString resource_string);
+const char *reverse_private_font_charset(PP_PrivateFontCharset charset);
+const char *reverse_scrollby(PP_ScrollBy_Dev unit);
 
 #endif // FPP_REVERSE_CONSTANT_H

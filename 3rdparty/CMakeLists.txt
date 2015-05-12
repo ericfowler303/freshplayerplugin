@@ -1,1 +1,4 @@
-add_library(parson-obj OBJECT parson/parson.c)
+add_subdirectory(parson)
+if (NOT WITH_GLES2)
+    add_subdirectory(angle)
+endif()

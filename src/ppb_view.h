@@ -1,5 +1,5 @@
 /*
- * Copyright © 2013-2014  Rinat Ibragimov
+ * Copyright © 2013-2015  Rinat Ibragimov
  *
  * This file is part of FreshPlayerPlugin.
  *
@@ -51,5 +51,9 @@ ppb_view_get_device_scale(PP_Resource resource);
 
 float
 ppb_view_get_css_scale(PP_Resource resource);
+
+PP_Bool
+ppb_view_get_scroll_offset(PP_Resource resource, struct PP_Point *offset);
+
 
 #endif // FPP_PPB_VIEW_H
